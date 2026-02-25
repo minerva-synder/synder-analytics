@@ -106,10 +106,16 @@ ORGS_MAP = {
 
 def prepare_mrr(mrr):
     """Add computed columns to mrr DataFrame."""
-    mrr["_sp"] = mrr["start_plan"].apply(norm_plan)
-    mrr["_ep"] = mrr["end_plan"].apply(norm_plan)
-    mrr["_sm"] = pd.to_numeric(mrr["start_mrr"], errors="coerce").fillna(0)
-    mrr["_em"] = pd.to_numeric(mrr["end_mrr"], errors="coerce").fillna(0)
+    if "start_plan" in mrr.columns:
+        mrr["_sp"] = mrr["start_plan"].apply(norm_plan)
+    else:
+        mrr["_sp"] = "UNKNOWN"
+    if "end_plan" in mrr.columns:
+        mrr["_ep"] = mrr["end_plan"].apply(norm_plan)
+    else:
+        mrr["_ep"] = "UNKNOWN"
+    mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
+    mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
     return mrr
 
 
@@ -475,8 +481,11 @@ def analyze():
 
         mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
         mrr, w1 = map_cols(mrr_raw, MRR_MAP)
-        if "org_id" in mrr.columns:
-            mrr = mrr.drop_duplicates(subset=["org_id"], keep="last")
+        # Log actual columns for debugging
+        w1.insert(0, f"CSV#1 columns detected: {list(mrr.columns[:15])}")
+        if "org_id" not in mrr.columns:
+            return jsonify({"error": f"CSV#1 must have an org_id column. Found: {list(mrr_raw.columns[:20])}"}), 400
+        mrr = mrr.drop_duplicates(subset=["org_id"], keep="last")
 
         orgs, w2 = None, []
         if csv2:
