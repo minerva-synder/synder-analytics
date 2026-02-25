@@ -473,14 +473,14 @@ def analyze():
         if not csv1:
             return jsonify({"error": "CSV #1 is required"}), 400
 
-        mrr_raw = pd.read_csv(csv1)
+        mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
         mrr, w1 = map_cols(mrr_raw, MRR_MAP)
         if "org_id" in mrr.columns:
             mrr = mrr.drop_duplicates(subset=["org_id"], keep="last")
 
         orgs, w2 = None, []
         if csv2:
-            orgs_raw = pd.read_csv(csv2)
+            orgs_raw = pd.read_csv(csv2, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
             orgs, w2 = map_cols(orgs_raw, ORGS_MAP)
             if "org_id" in orgs.columns:
                 orgs = orgs.drop_duplicates(subset=["org_id"], keep="last")
@@ -520,7 +520,7 @@ def growth_signals():
     try:
         csv1 = request.files.get("csv1")
         if csv1:
-            mrr_raw = pd.read_csv(csv1)
+            mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
             mrr, _ = map_cols(mrr_raw, MRR_MAP)
             names = mrr["org_name"].dropna().unique().tolist() if "org_name" in mrr.columns else []
         else:
