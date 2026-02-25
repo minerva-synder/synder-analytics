@@ -70,6 +70,87 @@ def map_cols(df, mapping):
     return df.rename(columns=renames), warns
 
 
+def detect_wide_format(df):
+    """Detect wide-format CSV with date-paired plan/amount columns.
+    Returns transformed DataFrame or None if not wide format."""
+    # Strip whitespace from column names first
+    df = df.rename(columns={c: c.strip() for c in df.columns})
+    cols = list(df.columns)
+    # Look for pattern: "plans (YYYY-MM-DD)" and "amount (YYYY-MM-DD)"
+    plan_cols = [c for c in cols if re.match(r'plans\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+    amount_cols = [c for c in cols if re.match(r'amount\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+
+    if len(plan_cols) < 2 or len(amount_cols) < 2:
+        return None
+
+    # Extract dates and sort
+    def extract_date(col_name):
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', col_name)
+        return m.group(1) if m else None
+
+    plan_dates = sorted([(extract_date(c), c) for c in plan_cols], key=lambda x: x[0])
+    amount_dates = sorted([(extract_date(c), c) for c in amount_cols], key=lambda x: x[0])
+
+    first_plan_col = plan_dates[0][1]
+    last_plan_col = plan_dates[-1][1]
+    first_amount_col = amount_dates[0][1]
+    last_amount_col = amount_dates[-1][1]
+
+    # Find org_name and org_id columns
+    name_col = col_find(df, ["organization name", "org_name", "organization_name", "name"])
+    id_col = col_find(df, ["organization id", "org_id", "organization_id", "id"])
+
+    if not name_col:
+        return None
+
+    result = pd.DataFrame()
+    result["org_name"] = df[name_col].apply(lambda v: str(v).strip().strip('"') if pd.notna(v) else "")
+
+    # Extract org_id from URL or raw value
+    if id_col:
+        def extract_org_id(v):
+            if pd.isna(v):
+                return ""
+            s = str(v).strip()
+            m = re.search(r'/view/(\d+)', s)
+            if m:
+                return m.group(1)
+            return s
+        result["org_id"] = df[id_col].apply(extract_org_id)
+    else:
+        result["org_id"] = range(1, len(df) + 1)
+
+    result["start_plan"] = df[first_plan_col].apply(lambda v: str(v).strip().strip('"') if pd.notna(v) else "")
+    result["start_mrr"] = pd.to_numeric(df[first_amount_col], errors="coerce").fillna(0)
+    result["end_plan"] = df[last_plan_col].apply(lambda v: str(v).strip().strip('"') if pd.notna(v) else "")
+    result["end_mrr"] = pd.to_numeric(df[last_amount_col], errors="coerce").fillna(0)
+
+    # Use Diff column if available
+    diff_col = col_find(df, ["Diff", "diff", "delta", "delta_mrr"])
+    if diff_col:
+        result["delta_mrr"] = pd.to_numeric(df[diff_col], errors="coerce").fillna(0)
+    else:
+        result["delta_mrr"] = result["end_mrr"] - result["start_mrr"]
+
+    # Derive status
+    def derive_status(row):
+        if row["end_mrr"] == 0 and row["start_mrr"] > 0:
+            return "churned"
+        if row["end_mrr"] > row["start_mrr"]:
+            return "expansion"
+        if row["end_mrr"] < row["start_mrr"]:
+            return "contraction"
+        return "retained"
+    result["status"] = result.apply(derive_status, axis=1)
+
+    # Store date range info
+    result.attrs["start_date"] = plan_dates[0][0]
+    result.attrs["end_date"] = plan_dates[-1][0]
+    result.attrs["date_count"] = len(plan_dates)
+
+    return result
+
+
 def _s(df, col):
     """Safe sum on a potentially empty df."""
     if df.empty or col not in df.columns:
@@ -480,11 +561,18 @@ def analyze():
             return jsonify({"error": "CSV #1 is required"}), 400
 
         mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
-        mrr, w1 = map_cols(mrr_raw, MRR_MAP)
-        # Log actual columns for debugging
-        w1.insert(0, f"CSV#1 columns detected: {list(mrr.columns[:15])}")
-        if "org_id" not in mrr.columns:
-            return jsonify({"error": f"CSV#1 must have an org_id column. Found: {list(mrr_raw.columns[:20])}"}), 400
+
+        # Try wide-format detection first (date-paired plan/amount columns)
+        wide = detect_wide_format(mrr_raw)
+        if wide is not None:
+            mrr = wide
+            w1 = [f"Wide-format CSV detected: {wide.attrs.get('date_count', '?')} dates from {wide.attrs.get('start_date', '?')} to {wide.attrs.get('end_date', '?')}",
+                   f"Transformed to {len(mrr)} rows with columns: {list(mrr.columns)}"]
+        else:
+            mrr, w1 = map_cols(mrr_raw, MRR_MAP)
+            w1.insert(0, f"CSV#1 columns detected: {list(mrr.columns[:15])}")
+            if "org_id" not in mrr.columns:
+                return jsonify({"error": f"CSV#1 must have an org_id column. Found: {list(mrr_raw.columns[:20])}"}), 400
         mrr = mrr.drop_duplicates(subset=["org_id"], keep="last")
 
         orgs, w2 = None, []
@@ -530,7 +618,11 @@ def growth_signals():
         csv1 = request.files.get("csv1")
         if csv1:
             mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
-            mrr, _ = map_cols(mrr_raw, MRR_MAP)
+            wide = detect_wide_format(mrr_raw)
+            if wide is not None:
+                mrr = wide
+            else:
+                mrr, _ = map_cols(mrr_raw, MRR_MAP)
             names = mrr["org_name"].dropna().unique().tolist() if "org_name" in mrr.columns else []
         else:
             data = request.get_json(silent=True)
