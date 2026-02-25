@@ -171,7 +171,7 @@ MRR_MAP = {
 ORGS_MAP = {
     "org_id": ["org_id", "organization_id", "id"],
     "org_name": ["org_name", "organization_name", "name", "company"],
-    "plan_name": ["plan_name", "plan", "current_plan", "end_plan"],
+    "plan_name": ["plan_name", "plan", "plan_bucket", "current_plan", "end_plan"],
     "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date"],
     "subscription_interval": ["subscription_interval", "sub_interval", "interval", "billing_interval"],
     "cancellation_date": ["cancellation_date", "unsubscribe_date", "cancel_date"],
@@ -182,6 +182,8 @@ ORGS_MAP = {
     "cancelled_syncs": ["cancelled_syncs", "canceled_syncs", "canceled_sync_count"],
     "rule_failed_syncs": ["rule_failed_syncs", "rule_failed_sync_count"],
     "last_sync_date": ["last_sync_date", "last_sync_creation_date", "last_sync"],
+    "touch": ["touch", "touch_tier", "touch_model"],
+    "mrr": ["mrr", "mrr_feb24", "mrr_current", "current_mrr"],
 }
 
 
@@ -574,12 +576,15 @@ def analyze():
             if "org_id" not in mrr.columns:
                 return jsonify({"error": f"CSV#1 must have an org_id column. Found: {list(mrr_raw.columns[:20])}"}), 400
         mrr = mrr.drop_duplicates(subset=["org_id"], keep="last")
+        # Ensure org_id is always string for consistent merging
+        mrr["org_id"] = mrr["org_id"].astype(str).str.strip()
 
         orgs, w2 = None, []
         if csv2:
             orgs_raw = pd.read_csv(csv2, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
             orgs, w2 = map_cols(orgs_raw, ORGS_MAP)
             if "org_id" in orgs.columns:
+                orgs["org_id"] = orgs["org_id"].astype(str).str.strip()
                 orgs = orgs.drop_duplicates(subset=["org_id"], keep="last")
 
         warns = w1 + w2
