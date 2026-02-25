@@ -1,0 +1,4 @@
+flask>=3.0
+pandas>=2.0
+gunicorn>=22.0
+duckduckgo-search>=7.0

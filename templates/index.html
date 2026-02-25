@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synder Analytics</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --primary: #4F46E5;
+  --primary-light: #818CF8;
+  --success: #10B981;
+  --danger: #EF4444;
+  --warning: #F59E0B;
+  --bg: #F8FAFC;
+  --card-bg: #FFFFFF;
+  --text: #1E293B;
+  --text-muted: #64748B;
+  --border: #E2E8F0;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+
+.navbar-brand { font-weight: 700; color: var(--primary) !important; font-size: 1.4rem; }
+.navbar { background: var(--card-bg); border-bottom: 1px solid var(--border); }
+
+/* Upload area */
+.upload-zone {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 40px;
+  text-align: center;
+  transition: all 0.2s;
+  cursor: pointer;
+  background: var(--card-bg);
+}
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--primary);
+  background: #EEF2FF;
+}
+.upload-zone.has-file {
+  border-color: var(--success);
+  background: #ECFDF5;
+}
+.upload-zone h5 { margin-bottom: 8px; }
+.upload-zone .icon { font-size: 2.5rem; margin-bottom: 12px; }
+.file-name { font-weight: 600; color: var(--success); margin-top: 8px; }
+
+/* Tabs */
+.nav-tabs .nav-link {
+  font-weight: 600;
+  color: var(--text-muted);
+  border: none;
+  padding: 12px 24px;
+}
+.nav-tabs .nav-link.active {
+  color: var(--primary);
+  border-bottom: 3px solid var(--primary);
+  background: transparent;
+}
+
+/* Cards */
+.metric-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  height: 100%;
+}
+.metric-card .label { font-size: 0.85rem; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.metric-card .value { font-size: 1.8rem; font-weight: 700; margin: 4px 0; }
+.metric-card .sub { font-size: 0.85rem; color: var(--text-muted); }
+.metric-card.green .value { color: var(--success); }
+.metric-card.red .value { color: var(--danger); }
+.metric-card.blue .value { color: var(--primary); }
+.metric-card.amber .value { color: var(--warning); }
+
+.section-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 24px 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+
+/* Tables */
+.data-table { font-size: 0.85rem; }
+.data-table th { background: #F1F5F9; font-weight: 600; white-space: nowrap; position: sticky; top: 0; }
+.data-table td { vertical-align: middle; }
+.table-wrapper { max-height: 500px; overflow-y: auto; border-radius: 8px; border: 1px solid var(--border); }
+
+/* Risk badges */
+.badge-risk { font-size: 0.75rem; }
+
+/* Loading */
+.spinner-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255,255,255,0.85);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999; flex-direction: column;
+}
+.spinner-overlay .spinner-border { width: 3rem; height: 3rem; }
+.spinner-overlay p { margin-top: 16px; font-weight: 600; color: var(--primary); }
+
+/* Waterfall chart container */
+.chart-container { position: relative; height: 350px; background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); padding: 16px; }
+
+/* Warnings */
+.warnings-box { background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+.warnings-box ul { margin: 0; padding-left: 20px; }
+
+/* Export buttons */
+.export-btn { font-size: 0.8rem; }
+
+#results { display: none; }
+#upload-section .container { max-width: 800px; }
+
+/* Growth signals progress */
+.growth-progress { margin: 12px 0; }
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-light px-4">
+  <span class="navbar-brand">📊 Synder Analytics</span>
+  <button class="btn btn-sm btn-outline-secondary" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+</nav>
+
+<!-- UPLOAD SECTION -->
+<div id="upload-section" class="py-5">
+  <div class="container">
+    <div class="text-center mb-4">
+      <h3>Upload your data</h3>
+      <p class="text-muted">Drop two CSV files to generate Retention Stats & Health Assessment dashboards</p>
+    </div>
+
+    <div class="row g-4 mb-4">
+      <div class="col-md-6">
+        <div class="upload-zone" id="zone1" onclick="document.getElementById('file1').click()">
+          <div class="icon">📄</div>
+          <h5>CSV #1 — MRR Data</h5>
+          <p class="text-muted small">MRR per day, org names & IDs, plan info</p>
+          <div class="file-name" id="file1name"></div>
+          <input type="file" id="file1" accept=".csv" style="display:none" onchange="handleFile(1, this)">
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="upload-zone" id="zone2" onclick="document.getElementById('file2').click()">
+          <div class="icon">📄</div>
+          <h5>CSV #2 — Paid Orgs Export</h5>
+          <p class="text-muted small">Plan, syncs, cancellation dates, intervals</p>
+          <div class="file-name" id="file2name"></div>
+          <input type="file" id="file2" accept=".csv" style="display:none" onchange="handleFile(2, this)">
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center">
+      <button class="btn btn-primary btn-lg px-5" id="btnAnalyze" onclick="runAnalysis()" disabled>
+        🚀 Run Analysis
+      </button>
+      <p class="text-muted small mt-2">CSV #1 is required. CSV #2 enables health assessment features.</p>
+    </div>
+  </div>
+</div>
+
+<!-- LOADING -->
+<div class="spinner-overlay" id="loading" style="display:none">
+  <div class="spinner-border text-primary"></div>
+  <p id="loadingText">Analyzing data...</p>
+</div>
+
+<!-- RESULTS -->
+<div id="results" class="pb-5">
+  <div class="container-fluid px-4">
+
+    <!-- Warnings -->
+    <div id="warningsBox" class="warnings-box" style="display:none">
+      <strong>⚠️ Warnings</strong>
+      <ul id="warningsList"></ul>
+    </div>
+
+    <!-- Meta -->
+    <div class="text-muted small mb-3" id="metaInfo"></div>
+
+    <!-- Dashboard Tabs -->
+    <ul class="nav nav-tabs mb-4" id="dashTabs">
+      <li class="nav-item">
+        <a class="nav-link active" data-bs-toggle="tab" href="#tab-retention">📈 Retention Stats</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tab-health">🏥 Health Assessment</a>
+      </li>
+    </ul>
+
+    <div class="tab-content">
+
+      <!-- ==================== TAB 1: RETENTION ==================== -->
+      <div class="tab-pane fade show active" id="tab-retention">
+
+        <!-- 1. Sandbox Cohort -->
+        <div class="section-title">1. Sandbox Cohort Analysis</div>
+
+        <!-- A: Cohort Size -->
+        <h6 class="text-muted mt-3 mb-2">A. Sandbox Cohort Size & MRR</h6>
+        <div class="row g-3 mb-3" id="sandboxCohortCards"></div>
+
+        <!-- B: Churn/Downgrade -->
+        <h6 class="text-muted mt-3 mb-2">B. Sandbox Churn & Downgrade This Month</h6>
+        <div class="row g-3 mb-3" id="sandboxChurnCards"></div>
+
+        <!-- C: Moved to Pro -->
+        <h6 class="text-muted mt-3 mb-2">C. Sandbox → Pro This Month</h6>
+        <div class="row g-3 mb-3" id="sandboxProCards"></div>
+
+        <!-- D: New MRR -->
+        <h6 class="text-muted mt-3 mb-2">D. New Sandbox MRR (was $0 at month start)</h6>
+        <div class="row g-3 mb-3" id="sandboxNewCards"></div>
+
+        <!-- E: Upgrades & Expansion -->
+        <h6 class="text-muted mt-3 mb-2">E. Sandbox Upgrades & Price Expansion</h6>
+        <div class="row g-3 mb-3" id="sandboxUpgradeCards"></div>
+
+        <!-- F: Not Syncing -->
+        <h6 class="text-muted mt-3 mb-2">F. Sandbox Not Syncing At All</h6>
+        <div id="sandboxNotSyncing" class="mb-3"></div>
+
+        <!-- G: Cancelled, Will Churn -->
+        <h6 class="text-muted mt-3 mb-2">G. Sandbox Already Cancelled (Will Churn)</h6>
+        <div id="sandboxCancelled" class="mb-3"></div>
+
+        <!-- 2. NRR -->
+        <div class="section-title">2. Net Revenue Retention (NRR)
+          <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('nrr_breakdown', nrrBreakdownData)">⬇ Export CSV</button>
+        </div>
+        <div class="row g-3 mb-3" id="nrrCards"></div>
+        <div class="chart-container mb-4"><canvas id="nrrWaterfall"></canvas></div>
+        <div class="table-wrapper" id="nrrTable"></div>
+
+        <!-- 3. Expansion MRR -->
+        <div class="section-title">3. Expansion MRR
+          <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('expansion', expansionData)">⬇ Export CSV</button>
+        </div>
+        <div class="row g-3 mb-3" id="expansionCards"></div>
+        <div class="table-wrapper" id="expansionTable"></div>
+      </div>
+
+      <!-- ==================== TAB 2: HEALTH ==================== -->
+      <div class="tab-pane fade" id="tab-health">
+
+        <!-- 1. Churn Prediction -->
+        <div class="section-title">1. Who Will Churn Soon
+          <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('churn_prediction', churnData)">⬇ Export CSV</button>
+        </div>
+        <div class="row g-3 mb-3" id="churnBuckets"></div>
+        <div class="table-wrapper" id="churnTable"></div>
+
+        <!-- 2. At Risk -->
+        <div class="section-title">2. At Risk — Low Sync Volume
+          <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('at_risk', atRiskData)">⬇ Export CSV</button>
+        </div>
+        <div id="atRiskSummary" class="mb-3"></div>
+        <div class="table-wrapper" id="atRiskTable"></div>
+
+        <!-- 3. Growth Signals -->
+        <div class="section-title">3. Business Growth Signals
+          <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('growth_signals', growthData)">⬇ Export CSV</button>
+        </div>
+        <div class="mb-3">
+          <button class="btn btn-primary" id="btnGrowth" onclick="runGrowthSignals()">🔍 Run Live Research</button>
+          <span class="text-muted small ms-2">Searches the web for each org — may take a few minutes</span>
+        </div>
+        <div class="growth-progress" id="growthProgress" style="display:none">
+          <div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" id="growthBar" style="width:0%"></div></div>
+          <p class="small text-muted mt-1" id="growthStatus"></p>
+        </div>
+        <div class="table-wrapper" id="growthTable"></div>
+      </div>
+
+    </div><!-- /tab-content -->
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ---- State ----
+let file1 = null, file2 = null;
+let analysisResult = null;
+let nrrBreakdownData = [], expansionData = [], churnData = [], atRiskData = [], growthData = [];
+
+// ---- Upload handling ----
+function handleFile(num, input) {
+  const f = input.files[0];
+  if (!f) return;
+  if (num === 1) { file1 = f; } else { file2 = f; }
+  const zone = document.getElementById('zone' + num);
+  const nameEl = document.getElementById('file' + num + 'name');
+  zone.classList.add('has-file');
+  nameEl.textContent = '✅ ' + f.name;
+  document.getElementById('btnAnalyze').disabled = !file1;
+}
+
+// Drag-and-drop
+document.querySelectorAll('.upload-zone').forEach((zone, idx) => {
+  const num = idx + 1;
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    const f = e.dataTransfer.files[0];
+    if (f) {
+      const input = document.getElementById('file' + num);
+      const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
+      handleFile(num, input);
+    }
+  });
+});
+
+// ---- Run Analysis ----
+async function runAnalysis() {
+  if (!file1) return;
+  showLoading('Analyzing data...');
+  const fd = new FormData();
+  fd.append('csv1', file1);
+  if (file2) fd.append('csv2', file2);
+
+  try {
+    const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (data.error) { alert('Error: ' + data.error); hideLoading(); return; }
+    analysisResult = data;
+    renderResults(data);
+    document.getElementById('upload-section').style.display = 'none';
+    document.getElementById('results').style.display = 'block';
+    document.getElementById('btnReset').style.display = 'inline-block';
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+  hideLoading();
+}
+
+function resetApp() {
+  document.getElementById('upload-section').style.display = 'block';
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('btnReset').style.display = 'none';
+  analysisResult = null;
+}
+
+// ---- Render ----
+function $(id) { return document.getElementById(id); }
+function fmt(v) { return v == null ? '—' : '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function pct(v) { return v == null ? '—' : v.toFixed(2) + '%'; }
+function num(v) { return v == null ? '—' : Number(v).toLocaleString(); }
+
+function metricCard(label, value, sub, color) {
+  return `<div class="col-sm-6 col-md-3"><div class="metric-card ${color||''}">
+    <div class="label">${label}</div><div class="value">${value}</div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}
+  </div></div>`;
+}
+
+function renderResults(data) {
+  // Warnings
+  if (data.warnings && data.warnings.length) {
+    $('warningsBox').style.display = 'block';
+    $('warningsList').innerHTML = data.warnings.map(w => `<li class="small">${w}</li>`).join('');
+  }
+
+  // Meta
+  $('metaInfo').textContent = `CSV #1: ${data.meta.csv1_rows} rows | CSV #2: ${data.meta.csv2_rows} rows`;
+
+  const d1 = data.dashboard1;
+  const d2 = data.dashboard2;
+
+  // ---- Dashboard 1 ----
+  renderSandbox(d1.sandbox_cohort);
+  renderNRR(d1.nrr);
+  renderExpansion(d1.expansion);
+
+  // ---- Dashboard 2 ----
+  if (d2.churn_prediction) renderChurn(d2.churn_prediction);
+  if (d2.at_risk) renderAtRisk(d2.at_risk);
+}
+
+function renderSandbox(sb) {
+  // A
+  const a = sb.A_cohort;
+  $('sandboxCohortCards').innerHTML =
+    metricCard('Accounts (Start)', num(a.start_count), '', 'blue') +
+    metricCard('MRR (Start)', fmt(a.start_mrr), '', 'blue') +
+    metricCard('Accounts (Now)', num(a.current_count), '', 'blue') +
+    metricCard('MRR (Now)', fmt(a.current_mrr), '', 'blue');
+
+  // B
+  const b = sb.B_churn_downgrade;
+  $('sandboxChurnCards').innerHTML =
+    metricCard('Churned', num(b.churned_count), 'MRR lost: ' + fmt(b.churned_mrr_lost), 'red') +
+    metricCard('Downgraded', num(b.downgraded_count), 'MRR delta: ' + fmt(b.downgraded_mrr_delta), 'amber');
+
+  // C
+  const c = sb.C_moved_to_pro;
+  $('sandboxProCards').innerHTML =
+    metricCard('Moved to Pro', num(c.count), 'MRR now: ' + fmt(c.mrr_now), 'green');
+
+  // D
+  const d = sb.D_new_mrr;
+  $('sandboxNewCards').innerHTML =
+    metricCard('New Sandbox Accounts', num(d.count), 'MRR: ' + fmt(d.mrr_now), 'green');
+
+  // E
+  const e = sb.E_upgrades_expansion;
+  $('sandboxUpgradeCards').innerHTML =
+    metricCard('Upgrades', num(e.upgrade_count), 'Delta: ' + fmt(e.upgrade_mrr_delta), 'green') +
+    metricCard('Expansion (same plan)', num(e.expansion_count), 'Delta: ' + fmt(e.expansion_mrr_delta), 'green') +
+    metricCard('Total Delta', fmt(e.total_delta), '', 'green');
+
+  // F
+  if (sb.F_not_syncing) {
+    const f = sb.F_not_syncing;
+    let html = metricCard('Not Syncing', num(f.count), 'MRR: ' + fmt(f.mrr), 'amber');
+    if (f.accounts && f.accounts.length) {
+      html += renderSmallTable(f.accounts, ['org_id', 'org_name', 'mrr']);
+    }
+    $('sandboxNotSyncing').innerHTML = `<div class="row g-3">${html}</div>`;
+  } else {
+    $('sandboxNotSyncing').innerHTML = '<p class="text-muted small">Requires CSV #2</p>';
+  }
+
+  // G
+  if (sb.G_cancelled_will_churn) {
+    const g = sb.G_cancelled_will_churn;
+    let html = metricCard('Will Churn', num(g.count), 'MRR at risk: ' + fmt(g.mrr_at_risk), 'red');
+    if (g.accounts && g.accounts.length) {
+      html += renderSmallTable(g.accounts, ['org_id', 'org_name', 'mrr', 'subscription_end_date']);
+    }
+    $('sandboxCancelled').innerHTML = `<div class="row g-3">${html}</div>`;
+  } else {
+    $('sandboxCancelled').innerHTML = '<p class="text-muted small">Requires CSV #2</p>';
+  }
+}
+
+function renderNRR(nrr) {
+  $('nrrCards').innerHTML =
+    metricCard('NRR', pct(nrr.nrr_pct), '', nrr.nrr_pct >= 100 ? 'green' : 'red') +
+    metricCard('Starting MRR', fmt(nrr.starting_mrr), '', 'blue') +
+    metricCard('Expansion', fmt(nrr.expansion_mrr), '', 'green') +
+    metricCard('Churn + Contraction', fmt(nrr.churn_mrr + nrr.contraction_mrr), 'Churn: ' + fmt(nrr.churn_mrr) + ' | Contract: ' + fmt(nrr.contraction_mrr), 'red');
+
+  // Waterfall chart
+  renderWaterfall('nrrWaterfall', nrr);
+
+  // Plan breakdown table
+  nrrBreakdownData = nrr.plan_breakdown;
+  $('nrrTable').innerHTML = renderTable(nrr.plan_breakdown, [
+    {key:'plan', label:'Plan'},
+    {key:'start_count', label:'Start #', fmt: num},
+    {key:'retained_count', label:'Retained #', fmt: num},
+    {key:'churned_count', label:'Churned #', fmt: num},
+    {key:'start_mrr', label:'Start MRR', fmt: fmt},
+    {key:'end_mrr', label:'End MRR', fmt: fmt},
+    {key:'nrr', label:'NRR %', fmt: v => pct(v ? v*100 : null)},
+    {key:'expansion', label:'Expansion', fmt: fmt},
+    {key:'contraction', label:'Contraction', fmt: fmt},
+    {key:'churn_mrr', label:'Churn MRR', fmt: fmt},
+  ]);
+}
+
+function renderWaterfall(canvasId, nrr) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  const labels = ['Starting MRR', 'Expansion', 'Churn', 'Contraction', 'Ending MRR'];
+  const starting = nrr.starting_mrr;
+  const expansion = nrr.expansion_mrr;
+  const churn = -nrr.churn_mrr;
+  const contraction = -nrr.contraction_mrr;
+  const ending = nrr.ending_mrr;
+
+  // For waterfall: invisible base + colored bar
+  const bases = [0, starting, starting + expansion, starting + expansion + churn, 0];
+  const values = [starting, expansion, churn, contraction, ending];
+  const colors = ['#4F46E5', '#10B981', '#EF4444', '#F59E0B', '#4F46E5'];
+
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Base', data: bases, backgroundColor: 'transparent', borderWidth: 0, stack: 'stack0' },
+        { label: 'Value', data: values.map(Math.abs), backgroundColor: colors, borderWidth: 0, stack: 'stack0',
+          datalabels: { display: true } },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 0) return '';
+              return fmt(values[ctx.dataIndex]);
+            }
+          }
+        }
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false } },
+        y: { stacked: true, ticks: { callback: v => '$' + (v/1000).toFixed(0) + 'k' } }
+      }
+    }
+  });
+}
+
+function renderExpansion(exp) {
+  $('expansionCards').innerHTML =
+    metricCard('Total Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts expanded', 'green');
+
+  expansionData = exp.top_expanders;
+  $('expansionTable').innerHTML = renderTable(exp.top_expanders, [
+    {key:'org_name', label:'Organization'},
+    {key:'starting_mrr', label:'Starting MRR', fmt: v => fmt(parseFloat(v))},
+    {key:'current_mrr', label:'Current MRR', fmt: v => fmt(parseFloat(v))},
+    {key:'delta', label:'Delta', fmt: v => fmt(parseFloat(v))},
+  ]);
+}
+
+function renderChurn(ch) {
+  if (ch.error) { $('churnBuckets').innerHTML = `<p class="text-danger">${ch.error}</p>`; return; }
+
+  $('churnBuckets').innerHTML = ch.buckets.map(b =>
+    metricCard(b.bucket, num(b.count), 'MRR at risk: ' + fmt(b.mrr_at_risk),
+      b.bucket === '0-7 days' ? 'red' : b.bucket === '8-14 days' ? 'amber' : '')
+  ).join('');
+
+  churnData = ch.accounts;
+  $('churnTable').innerHTML = renderTable(ch.accounts, [
+    {key:'org_id', label:'Org ID'},
+    {key:'org_name', label:'Organization'},
+    {key:'plan_display', label:'Plan'},
+    {key:'mrr', label:'MRR', fmt: fmt},
+    {key:'days_to_churn', label:'Days to Churn', fmt: num},
+    {key:'bucket', label:'Bucket'},
+  ]);
+}
+
+function renderAtRisk(ar) {
+  if (ar.error) { $('atRiskSummary').innerHTML = `<p class="text-danger">${ar.error}</p>`; return; }
+
+  $('atRiskSummary').innerHTML =
+    `<div class="row g-3">${metricCard('Total At Risk', num(ar.total_at_risk), '', 'amber')}</div>`;
+
+  if (ar.warnings && ar.warnings.length) {
+    $('atRiskSummary').innerHTML += `<div class="warnings-box mt-2"><ul>${ar.warnings.map(w=>`<li class="small">${w}</li>`).join('')}</ul></div>`;
+  }
+
+  atRiskData = ar.accounts;
+  $('atRiskTable').innerHTML = renderTable(ar.accounts, [
+    {key:'tier', label:'Tier'},
+    {key:'org_name', label:'Organization'},
+    {key:'org_id', label:'Org ID'},
+    {key:'plan_name', label:'Plan'},
+    {key:'mrr', label:'MRR', fmt: fmt},
+    {key:'subscription_start_date', label:'Sub Start'},
+    {key:'interval', label:'Interval'},
+    {key:'last_sync_date', label:'Last Sync'},
+    {key:'days_since_last_sync', label:'Days Since Sync', fmt: num},
+    {key:'sync_volume_total', label:'Total Syncs', fmt: num},
+    {key:'failure_ratio', label:'Failure %', fmt: v => v != null ? (v*100).toFixed(1)+'%' : '—'},
+    {key:'risk_reasons', label:'Risk Reasons'},
+    {key:'in_grace_window', label:'Grace?'},
+  ]);
+}
+
+// ---- Growth Signals ----
+async function runGrowthSignals() {
+  if (!file1) return;
+  $('btnGrowth').disabled = true;
+  $('btnGrowth').textContent = '⏳ Researching...';
+  $('growthProgress').style.display = 'block';
+  $('growthBar').style.width = '10%';
+  $('growthStatus').textContent = 'Sending org names for web research...';
+
+  const fd = new FormData();
+  fd.append('csv1', file1);
+
+  try {
+    // Simulate progress while waiting
+    let pct = 10;
+    const interval = setInterval(() => {
+      pct = Math.min(pct + 2, 90);
+      $('growthBar').style.width = pct + '%';
+      $('growthStatus').textContent = `Searching the web for growth signals... (${Math.round(pct)}%)`;
+    }, 2000);
+
+    const resp = await fetch('/api/growth-signals', { method: 'POST', body: fd });
+    clearInterval(interval);
+
+    const data = await resp.json();
+    $('growthBar').style.width = '100%';
+
+    if (data.error) {
+      $('growthStatus').textContent = 'Error: ' + data.error;
+    } else {
+      $('growthStatus').textContent = `Done! Searched ${data.total_searched} organizations.`;
+      growthData = data.signals;
+      renderGrowthSignals(data.signals);
+    }
+  } catch (e) {
+    $('growthStatus').textContent = 'Error: ' + e.message;
+  }
+
+  $('btnGrowth').disabled = false;
+  $('btnGrowth').textContent = '🔍 Run Live Research';
+}
+
+function renderGrowthSignals(signals) {
+  const withSignals = signals.filter(s => s.detected_growth_event_type);
+  const without = signals.filter(s => !s.detected_growth_event_type);
+
+  let html = `<p class="small text-muted mb-2">${withSignals.length} orgs with signals, ${without.length} with no verified signals</p>`;
+
+  html += renderTable(signals, [
+    {key:'org_name', label:'Organization'},
+    {key:'detected_growth_event_type', label:'Event Type', fmt: v => v || '<span class="text-muted">none</span>'},
+    {key:'event_summary', label:'Summary'},
+    {key:'event_date', label:'Date'},
+    {key:'confidence', label:'Confidence', fmt: v => {
+      const colors = {high:'success', medium:'warning', low:'secondary'};
+      return `<span class="badge bg-${colors[v]||'secondary'}">${v||'—'}</span>`;
+    }},
+    {key:'sources', label:'Sources', fmt: v => {
+      if (!v || !v.length) return '—';
+      return v.map(s => `<a href="${s.url}" target="_blank" class="small">${(s.title||'link').substring(0,40)}</a>`).join('<br>');
+    }},
+  ]);
+
+  $('growthTable').innerHTML = html;
+}
+
+// ---- Table Helpers ----
+function renderTable(rows, cols) {
+  if (!rows || !rows.length) return '<p class="text-muted small p-3">No data</p>';
+  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
+  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  html += '</tr></thead><tbody>';
+  rows.forEach(row => {
+    html += '<tr>';
+    cols.forEach(c => {
+      const val = row[c.key];
+      const display = c.fmt ? c.fmt(val) : (val ?? '—');
+      html += `<td>${display}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function renderSmallTable(rows, keys) {
+  if (!rows || !rows.length) return '';
+  return `<div class="col-12"><div class="table-wrapper mt-2">${renderTable(rows, keys.map(k => ({key:k, label:k, fmt: k==='mrr' ? fmt : undefined})))}</div></div>`;
+}
+
+// ---- Export CSV ----
+function exportCSV(name, rows) {
+  if (!rows || !rows.length) { alert('No data to export'); return; }
+  const keys = Object.keys(rows[0]);
+  let csv = keys.join(',') + '\n';
+  rows.forEach(r => {
+    csv += keys.map(k => {
+      let v = r[k];
+      if (v == null) return '';
+      if (typeof v === 'object') v = JSON.stringify(v);
+      v = String(v);
+      if (v.includes(',') || v.includes('"') || v.includes('\n')) {
+        v = '"' + v.replace(/"/g, '""') + '"';
+      }
+      return v;
+    }).join(',') + '\n';
+  });
+
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `synder_${name}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+// ---- Loading ----
+function showLoading(msg) { $('loading').style.display = 'flex'; $('loadingText').textContent = msg; }
+function hideLoading() { $('loading').style.display = 'none'; }
+</script>
+</body>
+</html>
