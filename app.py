@@ -698,9 +698,10 @@ def _research_growth_iter(org_names, max_orgs=500):
 
         out = []
         # Find result links and then the next snippet row
-        for m in re.finditer(r"class='result-link'[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", raw, flags=re.I | re.S):
-            href = m.group(1)
-            title = _strip_tags(m.group(2))
+        pat = r"<a[^>]*class='result-link'[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>|<a[^>]*href=\"([^\"]+)\"[^>]*class='result-link'[^>]*>(.*?)</a>"
+        for m in re.finditer(pat, raw, flags=re.I | re.S):
+            href = m.group(1) or m.group(3) or ""
+            title = _strip_tags(m.group(2) or m.group(4) or "")
 
             # Resolve DDG redirect → real URL
             if href.startswith("//"):
