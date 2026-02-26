@@ -793,11 +793,13 @@ def _research_growth_iter(org_names, max_orgs=500):
         # Gentle pacing helps avoid being throttled.
         time.sleep(0.4)
 
+        orgq = f'"{str(org).strip()}"'
         queries = [
-            f"{org} funding round",
-            f"{org} raised funding",
-            f"{org} Series A Series B funding",
-            f"{org} acquired acquisition",
+            f"{orgq} funding round",
+            f"{orgq} raised funding",
+            f"{orgq} investment round valuation",
+            f"{orgq} Series A Series B funding",
+            f"{orgq} acquired acquisition",
         ]
 
         last_err = None
