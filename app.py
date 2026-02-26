@@ -18,19 +18,30 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 # Constants
 # ---------------------------------------------------------------------------
 SANDBOX_PLANS = {"PRO_SANDBOX", "SANDBOX"}
-HIGH_TOUCH = {"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "SMALL_ENTERPRISE"}
-MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "LARGE"}
+HIGH_TOUCH = {"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "PREMIUM_SPLIT_LICENSE", "SMALL_ENTERPRISE"}
+MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"}
 NRR_PLANS = HIGH_TOUCH | MEDIUM_TOUCH
+BASE_PLANS = SANDBOX_PLANS | HIGH_TOUCH | MEDIUM_TOUCH | {"ESSENTIAL", "MEDIUM", "SCALE", "BASIC", "STARTER"}
+# Add-ons to skip when finding the base plan
+ADDON_PLANS = {"SALES_VOLUME", "ADDITIONAL_USER", "SMART_RULE_UP_TO_10", "SMART_RULE_UP_TO_30",
+               "REV_REC_UP_TO_10K", "REV_REC_MED", "REV_REC_SMALL", "INVOICING", "INVOICING_UP_TO_50",
+               "INVOICING_UP_TO_1000", "GROWTH", "PROFESSIONAL"}
 
 
 def norm_plan(raw):
     if pd.isna(raw) or str(raw).strip() in ("", "-", "nan", "None"):
         return None
     plans = [p.strip().upper() for p in str(raw).split(",")]
+    # First pass: find a known base plan
     for p in plans:
-        if p != "SALES_VOLUME":
+        if p in BASE_PLANS:
             return p
-    return plans[0]
+    # Second pass: return first non-addon
+    for p in plans:
+        if p not in ADDON_PLANS:
+            return p
+    # Fallback
+    return plans[0] if plans else None
 
 
 def is_sandbox(p):
@@ -249,7 +260,7 @@ def sandbox_analysis(mrr):
         }, ["No sandbox accounts at period start"]
 
     churned = sb_start[(sb_start["_em"] == 0) | sb_start["_ep"].isna()]
-    downgraded = sb_start[sb_start["_ep"].isin({"BASIC", "ESSENTIAL", "MEDIUM"})]
+    downgraded = sb_start[sb_start["_ep"].isin({"BASIC", "ESSENTIAL", "MEDIUM", "SCALE", "STARTER"})]
     B = {
         "churned_count": len(churned), "churned_mrr_lost": money(_s(churned, "_sm")),
         "downgraded_count": len(downgraded),
@@ -258,13 +269,13 @@ def sandbox_analysis(mrr):
         "downgraded_mrr_delta": money(_s(downgraded, "_em") - _s(downgraded, "_sm")),
     }
 
-    moved_pro = sb_start[sb_start["_ep"].isin({"PRO", "PRO_SPLIT"})]
+    moved_pro = sb_start[sb_start["_ep"].isin({"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"})]
     C = {"count": len(moved_pro), "mrr_now": money(_s(moved_pro, "_em"))}
 
     new_sb = mrr[(mrr["_ep"].apply(is_sandbox)) & (mrr["_sm"] == 0)]
     D = {"count": len(new_sb), "mrr_now": money(_s(new_sb, "_em"))}
 
-    upgrades = sb_start[sb_start["_ep"].isin({"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "SMALL_ENTERPRISE"})]
+    upgrades = sb_start[sb_start["_ep"].isin(HIGH_TOUCH)]
     expansion = sb_start[(sb_start["_ep"].apply(is_sandbox)) & (sb_start["_em"] > sb_start["_sm"])]
     ud = _s(upgrades, "_em") - _s(upgrades, "_sm")
     ed = _s(expansion, "_em") - _s(expansion, "_sm")
