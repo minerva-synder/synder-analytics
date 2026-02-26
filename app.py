@@ -169,21 +169,21 @@ MRR_MAP = {
 }
 
 ORGS_MAP = {
-    "org_id": ["org_id", "organization_id", "id"],
-    "org_name": ["org_name", "organization_name", "name", "company"],
-    "plan_name": ["plan_name", "plan", "plan_bucket", "current_plan", "end_plan"],
-    "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date"],
-    "subscription_interval": ["subscription_interval", "sub_interval", "interval", "billing_interval"],
-    "cancellation_date": ["cancellation_date", "unsubscribe_date", "cancel_date"],
-    "subscription_end_date": ["subscription_end_date", "sub_end_date", "end_date"],
-    "total_syncs": ["total_syncs", "sync_volume_total", "total_sync_count"],
-    "finished_syncs": ["finished_syncs", "successful_syncs"],
-    "failed_syncs": ["failed_syncs", "failed_sync_count"],
-    "cancelled_syncs": ["cancelled_syncs", "canceled_syncs", "canceled_sync_count"],
-    "rule_failed_syncs": ["rule_failed_syncs", "rule_failed_sync_count"],
-    "last_sync_date": ["last_sync_date", "last_sync_creation_date", "last_sync"],
+    "org_id": ["org_id", "organization_id", "id", "org id"],
+    "org_name": ["org_name", "organization_name", "name", "company", "org name"],
+    "plan_name": ["plan_name", "plan", "plan_bucket", "current_plan", "end_plan", "plans", "product name"],
+    "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date", "sub started"],
+    "subscription_interval": ["subscription_interval", "sub_interval", "interval", "billing_interval", "sub interval"],
+    "cancellation_date": ["cancellation_date", "unsubscribe_date", "cancel_date", "unsubscribe date"],
+    "subscription_end_date": ["subscription_end_date", "sub_end_date", "end_date", "sub end date"],
+    "total_syncs": ["total_syncs", "sync_volume_total", "total_sync_count", "total syncs"],
+    "finished_syncs": ["finished_syncs", "successful_syncs", "finished syncs"],
+    "failed_syncs": ["failed_syncs", "failed_sync_count", "failed syncs"],
+    "cancelled_syncs": ["cancelled_syncs", "canceled_syncs", "canceled_sync_count", "canceled syncs"],
+    "rule_failed_syncs": ["rule_failed_syncs", "rule_failed_sync_count", "rule failed syncs"],
+    "last_sync_date": ["last_sync_date", "last_sync_creation_date", "last_sync", "last sync creation date"],
     "touch": ["touch", "touch_tier", "touch_model"],
-    "mrr": ["mrr", "mrr_feb24", "mrr_current", "current_mrr"],
+    "mrr": ["mrr", "mrr_feb24", "mrr_current", "current_mrr", "sub amount", "sub_amount"],
 }
 
 
