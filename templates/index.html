@@ -865,6 +865,13 @@ function parseSortableValue(s) {
     if (!Number.isNaN(t)) return { type: 'date', value: t };
   }
 
+  // Month-name dates (e.g., "February 12, 2026")
+  // Date.parse can handle these in modern browsers; gate on letters to avoid mis-parsing plain numbers.
+  if (/[A-Za-z]{3,}/.test(s)) {
+    const t2 = Date.parse(s);
+    if (!Number.isNaN(t2)) return { type: 'date', value: t2 };
+  }
+
   // Number-like (currency/percent/commas)
   const numStr = s.replace(/[$,%]/g, '').replace(/,/g, '').trim();
   if (/^-?\d+(\.\d+)?$/.test(numStr)) {
