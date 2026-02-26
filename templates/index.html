@@ -384,6 +384,7 @@ function renderDetailsTable(rows) {
   if (!rows || !rows.length) return '<p class="text-muted small p-3">No data</p>';
 
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
+  const hasLastDate = rows.some(r => r.last_mrr_date != null);
 
   const cols = [
     {key:'org_id', label:'Org ID'},
@@ -392,6 +393,7 @@ function renderDetailsTable(rows) {
     {key:'start_plan', label:'Start Plan'},
     {key:'end_plan', label:'End Plan'},
     ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
+    ...(hasLastDate ? [{key:'last_mrr_date', label:'Last MRR date'}] : []),
     {key:'end_mrr', label:'End MRR', fmt: fmt},
     {key:'delta', label:'Delta', fmt: fmt},
   ];

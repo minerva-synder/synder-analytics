@@ -52,7 +52,7 @@ def accounts_table(df, start_col="_sm", end_col="_em"):
     out = []
     for _, r in df.iterrows():
         oid = r.get("org_id", "")
-        out.append({
+        rec = {
             "org_id": str(oid) if oid is not None else "",
             "synder_url": synder_org_url(oid),
             "org_name": r.get("org_name", ""),
@@ -61,7 +61,11 @@ def accounts_table(df, start_col="_sm", end_col="_em"):
             "start_mrr": money(r.get(start_col, 0)),
             "end_mrr": money(r.get(end_col, 0)),
             "delta": money(money(r.get(end_col, 0)) - money(r.get(start_col, 0))),
-        })
+        }
+        if "last_active_mrr" in df.columns:
+            rec["last_active_mrr"] = money(r.get("last_active_mrr", 0))
+            rec["last_active_date"] = r.get("last_active_date", None)
+        out.append(rec)
     return out
 
 
@@ -188,6 +192,22 @@ def detect_wide_format(df):
     result["start_mrr"] = pd.to_numeric(df[first_amount_col], errors="coerce").fillna(0)
     result["end_plan"] = df[last_plan_col].apply(lambda v: str(v).strip().strip('"') if pd.notna(v) else "")
     result["end_mrr"] = pd.to_numeric(df[last_amount_col], errors="coerce").fillna(0)
+
+    # For churn drill-down: last non-zero MRR inside the period (more accurate than start_mrr when the account churns mid-period)
+    amount_pairs = amount_dates  # list of (date_str, col)
+    def last_active(row):
+        for ds, col in reversed(amount_pairs):
+            try:
+                v = float(row.get(col, 0) or 0)
+            except Exception:
+                v = 0
+            if v and v > 0:
+                return v, ds
+        return 0.0, None
+
+    la = df.apply(last_active, axis=1, result_type='expand')
+    result["last_active_mrr"] = pd.to_numeric(la[0], errors="coerce").fillna(0)
+    result["last_active_date"] = la[1]
 
     # Use Diff column if available
     diff_col = col_find(df, ["Diff", "diff", "delta", "delta_mrr"])
@@ -317,9 +337,13 @@ def sandbox_analysis(mrr):
     churned = sb_start[(sb_start["_em"] == 0) | sb_start["_ep"].isna()]
     downgraded = sb_start[sb_start["_ep"].isin({"BASIC", "ESSENTIAL", "MEDIUM", "SCALE", "STARTER"})]
     churned_accounts = accounts_table(churned)
-    # For churned sandboxes, 'start_mrr' is the last non-zero MRR we have in the period (proxy for pre-churn MRR)
+    # For churned sandboxes, use last non-zero MRR inside the period when available (wide-format CSV)
     for a in churned_accounts:
-        a["last_mrr_before_churn"] = a.get("start_mrr", 0)
+        a["last_mrr_before_churn"] = a.get("last_active_mrr", None)
+        if a["last_mrr_before_churn"] is None or a["last_mrr_before_churn"] == 0:
+            a["last_mrr_before_churn"] = a.get("start_mrr", 0)
+        if a.get("last_active_date"):
+            a["last_mrr_date"] = a.get("last_active_date")
 
     B = {
         "churned_count": len(churned), "churned_mrr_lost": money(_s(churned, "_sm")),
