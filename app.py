@@ -4,7 +4,10 @@ Flask app: two CSVs → two dashboards.
 """
 
 import os, json, re, math, traceback, csv, threading, time, uuid
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlparse as _urlparse
+import urllib.request
+import urllib.parse
+import html as _html
 from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
@@ -661,25 +664,16 @@ def at_risk_analysis(mrr, orgs):
 # ---------------------------------------------------------------------------
 
 def _research_growth_iter(org_names, max_orgs=500):
-    """Generator: yields one result dict per org."""
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        raise RuntimeError("duckduckgo-search not installed")
+    """Generator: yields one result dict per org.
 
-    ddgs = DDGS()
+    Uses DuckDuckGo *Lite* HTML results (more reliable than the JSON endpoints on some hosts).
+    """
 
     TRUSTED_DOMAINS = {
         "crunchbase.com", "techcrunch.com", "venturebeat.com", "prnewswire.com", "businesswire.com",
-        "globenewswire.com", "marketwatch.com", "reuters.com", "bloomberg.com", "sec.gov"
+        "globenewswire.com", "marketwatch.com", "reuters.com", "bloomberg.com", "sec.gov",
+        "ft.com", "wsj.com", "cnbc.com", "forbes.com", "fortune.com"
     }
-
-    def _get(d, *keys):
-        for k in keys:
-            v = d.get(k)
-            if v is not None and str(v).strip() != "":
-                return v
-        return ""
 
     def _domain(u):
         try:
@@ -687,51 +681,90 @@ def _research_growth_iter(org_names, max_orgs=500):
         except Exception:
             return ""
 
+    def _strip_tags(s):
+        s = re.sub(r"<[^>]+>", " ", s or "")
+        s = _html.unescape(s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    def ddg_lite_search(query, max_results=6):
+        q = urllib.parse.quote_plus(query)
+        url = f"https://lite.duckduckgo.com/lite/?q={q}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        out = []
+        # Find result links and then the next snippet row
+        for m in re.finditer(r"class='result-link'[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", raw, flags=re.I | re.S):
+            href = m.group(1)
+            title = _strip_tags(m.group(2))
+
+            # Resolve DDG redirect → real URL
+            if href.startswith("//"):
+                href2 = "https:" + href
+            else:
+                href2 = href
+
+            real_url = href2
+            try:
+                pu = urlparse(href2)
+                qs = parse_qs(pu.query)
+                if "uddg" in qs and qs["uddg"]:
+                    real_url = qs["uddg"][0]
+            except Exception:
+                pass
+
+            # Snippet typically appears in the next result-snippet cell after this link
+            snippet = ""
+            m2 = re.search(r"class='result-snippet'>(.*?)</td>", raw[m.end():], flags=re.I | re.S)
+            if m2:
+                snippet = _strip_tags(m2.group(1))
+
+            out.append({"title": title, "body": snippet, "url": real_url})
+            if len(out) >= max_results:
+                break
+
+        return out
+
     for org in org_names[:max_orgs]:
         if not org or str(org).strip() == "":
             continue
 
-        # Gentle pacing helps avoid being throttled/banned by the search provider.
-        time.sleep(0.35)
+        # Gentle pacing helps avoid being throttled.
+        time.sleep(0.4)
 
         queries = [
-            f'"{org}" (raised OR funding OR "funding round" OR investment OR "series" OR acquired OR acquisition OR merger OR IPO)',
-            f'"{org}" ("Series A" OR "Series B" OR "Series C" OR seed OR pre-seed OR funding)',
-            f'"{org}" (acquired OR acquisition OR merger)',
+            f"{org} funding round",
+            f"{org} raised funding",
+            f"{org} Series A Series B funding",
+            f"{org} acquired acquisition",
         ]
 
-        sr = []
         last_err = None
-        for qi, query in enumerate(queries):
-            # Retry each query a couple of times.
+        norm = []
+        for query in queries:
             for attempt in range(2):
                 try:
-                    got = list(ddgs.text(query, max_results=6))
-                    if got:
-                        sr = got
+                    norm = ddg_lite_search(query, max_results=6)
+                    if norm:
                         last_err = None
                         break
                 except Exception as e:
                     last_err = e
                     time.sleep(1.25 * (attempt + 1) ** 2)
-            if sr:
+            if norm:
                 break
 
-        if last_err is not None and not sr:
+        if last_err is not None and not norm:
             yield {"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {last_err}", "event_date": None, "confidence": "low", "sources": []}
             continue
 
-        if not sr:
+        if not norm:
             yield {"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified growth signals found", "event_date": None, "confidence": "low", "sources": []}
             continue
-
-        # Normalize fields across library versions
-        norm = []
-        for r in sr:
-            title = str(_get(r, "title", "headline", "name") or "")
-            body = str(_get(r, "body", "snippet", "description", "content") or "")
-            url = str(_get(r, "href", "url", "link") or "")
-            norm.append({"title": title, "body": body, "url": url})
 
         combined_raw = " ".join([(n.get("title", "") + " " + n.get("body", "")).strip() for n in norm if (n.get("title") or n.get("body"))])
         text = combined_raw.lower()
@@ -762,7 +795,9 @@ def _research_growth_iter(org_names, max_orgs=500):
                 amount = f"${num}{suffix}"
 
         if amount:
-            # normalize m/b suffix
+            # normalize million/billion and m/b suffix
+            amount = re.sub(r'million', 'M', amount, flags=re.I)
+            amount = re.sub(r'billion', 'B', amount, flags=re.I)
             amount = re.sub(r'\bm\b', 'M', amount, flags=re.I)
             amount = re.sub(r'\bb\b', 'B', amount, flags=re.I)
             conf = "high" if etype else "medium"
