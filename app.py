@@ -18,6 +18,12 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 # Constants
 # ---------------------------------------------------------------------------
 SANDBOX_PLANS = {"PRO_SANDBOX", "SANDBOX"}
+
+# Touch model (per Valentina):
+# - High touch: Premium / Premium Split, Small Enterprise
+# - Medium touch: Pro / Pro Split, Large
+# - Low touch: all other paid plans
+# - Sandbox is excluded from all touch tiers
 HIGH_TOUCH = {"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "PREMIUM_SPLIT_LICENSE", "SMALL_ENTERPRISE"}
 MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"}
 NRR_PLANS = HIGH_TOUCH | MEDIUM_TOUCH
@@ -46,6 +52,22 @@ def norm_plan(raw):
 
 def is_sandbox(p):
     return p in SANDBOX_PLANS if p else False
+
+
+def touch_tier(plan):
+    """Derive touch tier from a plan name.
+    Returns: 'high' | 'medium' | 'low' | None (for sandbox/unknown)
+    """
+    p = norm_plan(plan)
+    if not p:
+        return "low"
+    if p in SANDBOX_PLANS:
+        return None
+    if p in HIGH_TOUCH:
+        return "high"
+    if p in MEDIUM_TOUCH:
+        return "medium"
+    return "low"
 
 
 def parse_dates(s):
@@ -405,6 +427,10 @@ def churn_prediction(mrr, orgs):
     wc["mrr"] = wc["_oid"].map(mrr_lu).apply(lambda v: money(v) if pd.notna(v) else 0)
 
     plan_col = col_find(wc, ["plan_name", "plan", "end_plan"])
+    if not plan_col:
+        # Fall back to CSV#1 end plan if CSV#2 doesn't have a plan column
+        end_plan_lu = dict(zip(mrr["org_id"].astype(str), mrr.get("end_plan", pd.Series(dtype="object"))))
+        wc["plan_display"] = wc["_oid"].map(end_plan_lu)
 
     buckets = []
     for b in ["0-7 days", "8-14 days", "15-30 days", "31+ days"]:
@@ -414,6 +440,7 @@ def churn_prediction(mrr, orgs):
     cols = ["org_id", "org_name", "mrr", "days_to_churn", "bucket"]
     if plan_col and plan_col in wc.columns:
         wc["plan_display"] = wc[plan_col]
+    if "plan_display" in wc.columns:
         cols.insert(2, "plan_display")
 
     # Ensure org_name exists
@@ -437,14 +464,18 @@ def at_risk_analysis(mrr, orgs):
     orgs["_oid"] = orgs["org_id"].astype(str)
     ic = orgs[orgs["_oid"].isin(ids)].copy()
 
+    # Plan is not guaranteed to be present in CSV#2 — if missing, fall back to CSV#1 (MRR end plan)
     pc = col_find(ic, ["plan_name", "plan", "end_plan"])
-    if not pc:
-        return {"error": "No plan column in CSV #2", "accounts": []}
-    ic["_pn"] = ic[pc].apply(norm_plan)
+    if pc:
+        ic["_pn"] = ic[pc].apply(norm_plan)
+    else:
+        end_plan_lu = dict(zip(mrr["org_id"].astype(str), mrr.get("end_plan", pd.Series(dtype="object"))))
+        ic["_pn"] = ic["_oid"].map(end_plan_lu).apply(norm_plan)
 
-    ht = ic[ic["_pn"].isin(HIGH_TOUCH)].copy(); ht["_touch"] = "high"
-    mt = ic[ic["_pn"].isin(MEDIUM_TOUCH)].copy(); mt["_touch"] = "medium"
-    f = pd.concat([ht, mt], ignore_index=True)
+    ic["_touch"] = ic["_pn"].apply(touch_tier)
+
+    # Keep only high/medium touch for the At-Risk model
+    f = ic[ic["_touch"].isin({"high", "medium"})].copy()
     if f.empty:
         return {"total_at_risk": 0, "accounts": [], "warnings": ["No high/medium touch accounts"]}
 
