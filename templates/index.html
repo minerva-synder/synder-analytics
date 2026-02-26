@@ -700,10 +700,9 @@ function renderChurn(ch) {
     {key:'org_name', label:'Organization'},
     {key:'plan_display', label:'Plan'},
     {key:'mrr', label:'MRR', fmt: fmt},
-    {key:'churn_date', label:'Date of churn'},
-    {key:'subscription_end_date', label:'Sub ends'},
+    {key:'churn_date', label:'Churn date'},
     {key:'bucket', label:'Bucket'},
-  ]);
+  ], { tableId: 'tbl_churn_prediction', sortable: true });
 }
 
 function renderAtRisk(ar) {

@@ -506,9 +506,20 @@ def churn_prediction(mrr, orgs):
 
     wc = ic[(ic["_cd"].notna()) & (ic["_se"].notna()) & (ic["_se"] > today)].copy()
     wc["days_to_churn"] = (wc["_se"] - today).dt.days
-    wc["churn_date"] = wc["_se"].dt.date.astype(str)
+
+    def long_date(ts):
+        try:
+            if pd.isna(ts):
+                return None
+            # ts is a pandas Timestamp
+            return f"{ts.strftime('%B')} {ts.day}, {ts.year}"
+        except Exception:
+            return None
+
+    # Human-friendly churn date (e.g., February 12, 2026)
+    wc["churn_date"] = wc["_se"].apply(long_date)
     # Keep subscription_end_date separately for display (often same as churn_date)
-    wc["subscription_end_date"] = wc["_se"].dt.date.astype(str)
+    wc["subscription_end_date"] = wc["_se"].apply(long_date)
 
     def bucket(d):
         if d <= 7: return "0-7 days"
