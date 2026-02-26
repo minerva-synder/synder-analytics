@@ -383,6 +383,9 @@ function $(id) { return document.getElementById(id); }
 function fmt(v) { return v == null ? '—' : '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
 function pct(v) { return v == null ? '—' : v.toFixed(2) + '%'; }
 function num(v) { return v == null ? '—' : Number(v).toLocaleString(); }
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[ch]));
+}
 
 function setDetails(key, title, rows) {
   detailsStore[key] = { title: title || 'Details', rows: rows || [] };
@@ -414,7 +417,7 @@ function renderDetailsTable(rows) {
     html += '<tr>';
     cols.forEach(c => {
       const val = r[c.key];
-      const display = c.fmt ? c.fmt(val) : (val ?? '—');
+      const display = c.fmt ? c.fmt(val, r) : (val ?? '—');
       html += `<td>${display}</td>`;
     });
     html += '</tr>';
@@ -650,11 +653,17 @@ function renderExpansion(exp) {
 
   expansionData = exp.top_expanders;
   $('expansionTable').innerHTML = renderTable(exp.top_expanders, [
-    {key:'org_name', label:'Organization'},
+    {key:'org_name', label:'Organization', fmt: (v, row) => {
+      const oid = row && row.org_id ? String(row.org_id).trim() : '';
+      const name = esc(v || '');
+      if (!oid) return name || '—';
+      const url = `https://go.synder.com/organizations/view/${encodeURIComponent(oid)}`;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${name}</a>`;
+    }},
     {key:'starting_mrr', label:'Starting MRR', fmt: v => fmt(parseFloat(v))},
     {key:'current_mrr', label:'Current MRR', fmt: v => fmt(parseFloat(v))},
     {key:'delta', label:'Delta', fmt: v => fmt(parseFloat(v))},
-  ]);
+  ], { tableId: 'tbl_expansion_mrr', sortable: true });
 }
 
 function renderChurn(ch) {
@@ -911,7 +920,7 @@ function renderTable(rows, cols, opts) {
     html += '<tr>';
     cols.forEach(c => {
       const val = row[c.key];
-      const display = c.fmt ? c.fmt(val) : (val ?? '—');
+      const display = c.fmt ? c.fmt(val, row) : (val ?? '—');
       html += `<td>${display}</td>`;
     });
     html += '</tr>';

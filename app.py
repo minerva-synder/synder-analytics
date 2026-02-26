@@ -475,7 +475,7 @@ def expansion_analysis(mrr):
     return {
         "total_expansion_mrr": money(_s(exp, "_delta")),
         "expander_count": len(exp),
-        "top_expanders": exp.head(20)[["org_name", "start_mrr", "end_mrr", "_delta"]].rename(
+        "top_expanders": exp.head(20)[["org_id", "org_name", "start_mrr", "end_mrr", "_delta"]].rename(
             columns={"start_mrr": "starting_mrr", "end_mrr": "current_mrr", "_delta": "delta"}
         ).to_dict("records"),
         # For drill-down (click metric card)
