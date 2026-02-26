@@ -123,13 +123,48 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 
 /* Growth signals progress */
 .growth-progress { margin: 12px 0; }
+
+/* Support QA */
+.qa-ticket {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+  transition: border-color 0.2s;
+}
+.qa-ticket.flagged { border-left: 4px solid var(--danger); }
+.qa-ticket.ok { border-left: 4px solid var(--success); }
+.qa-ticket.pending { border-left: 4px solid var(--text-muted); }
+.qa-ticket .ticket-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.qa-ticket .ticket-id { font-weight: 700; font-size: 1rem; }
+.qa-ticket .ticket-id a { color: var(--primary); text-decoration: none; }
+.qa-ticket .ticket-id a:hover { text-decoration: underline; }
+.qa-ticket .ticket-meta { font-size: 0.85rem; color: var(--text-muted); }
+.qa-ticket .categories { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.qa-ticket .categories .badge { font-size: 0.75rem; }
+.qa-ticket .analysis-text { font-size: 0.9rem; line-height: 1.5; margin: 10px 0; white-space: pre-wrap; }
+.qa-ticket .suggested-fix { background: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 8px; padding: 12px; margin: 10px 0; font-size: 0.9rem; }
+.qa-ticket .suggested-fix strong { color: var(--success); }
+.qa-ticket .review-actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+.qa-ticket .comments-section { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.qa-ticket .comment { background: #F8FAFC; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 0.85rem; }
+.qa-ticket .comment .comment-author { font-weight: 600; color: var(--primary); }
+.qa-ticket .comment .comment-time { font-size: 0.75rem; color: var(--text-muted); }
+.qa-review-badge { font-size: 0.8rem; padding: 4px 10px; }
+.qa-review-badge.approved { background: #D1FAE5; color: #065F46; }
+.qa-review-badge.revision_needed { background: #FEE2E2; color: #991B1B; }
+.qa-review-badge.pending { background: #F3F4F6; color: #6B7280; }
 </style>
 </head>
 <body>
 
 <nav class="navbar navbar-light px-4">
   <span class="navbar-brand">📊 Synder Analytics</span>
-  <button class="btn btn-sm btn-outline-secondary" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm btn-outline-primary" id="btnQADirect" onclick="showQADirect()">🔍 Support QA</button>
+    <button class="btn btn-sm btn-outline-secondary" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+  </div>
 </nav>
 
 <!-- UPLOAD SECTION -->
@@ -196,6 +231,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
       </li>
       <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#tab-health">🏥 Health Assessment</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tab-qa" id="qaTabLink">🔍 Support QA</a>
       </li>
     </ul>
 
@@ -293,6 +331,28 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
           <p class="small text-muted mt-1" id="growthStatus"></p>
         </div>
         <div class="table-wrapper" id="growthTable"></div>
+      </div>
+
+      <!-- ==================== TAB 3: SUPPORT QA ==================== -->
+      <div class="tab-pane fade" id="tab-qa">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div>
+            <h5 class="mb-1">Support QA Review</h5>
+            <p class="text-muted small mb-0">Review Minerva's ticket analyses. Approve, request revision, or add comments before full batch run.</p>
+          </div>
+          <div class="d-flex gap-2 align-items-center">
+            <select id="qaBatchFilter" class="form-select form-select-sm" style="width:auto" onchange="loadQATickets()">
+              <option value="">All batches</option>
+            </select>
+            <button class="btn btn-sm btn-outline-primary" onclick="loadQATickets()">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <!-- QA Summary Cards -->
+        <div class="row g-3 mb-4" id="qaSummaryCards"></div>
+
+        <!-- QA Tickets -->
+        <div id="qaTicketsList"></div>
       </div>
 
     </div><!-- /tab-content -->
@@ -1024,6 +1084,197 @@ function exportCSV(name, rows) {
 // ---- Loading ----
 function showLoading(msg) { $('loading').style.display = 'flex'; $('loadingText').textContent = msg; }
 function hideLoading() { $('loading').style.display = 'none'; }
+
+// ---- Support QA ----
+let qaTickets = [];
+
+async function loadQATickets() {
+  const batch = $('qaBatchFilter') ? $('qaBatchFilter').value : '';
+  const url = '/api/qa/tickets' + (batch ? `?batch=${encodeURIComponent(batch)}` : '');
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.success) { console.error(data.error); return; }
+    qaTickets = data.tickets || [];
+
+    // Populate batch filter
+    const batches = data.batches || {};
+    const sel = $('qaBatchFilter');
+    const curVal = sel.value;
+    sel.innerHTML = '<option value="">All batches</option>';
+    Object.keys(batches).sort().reverse().forEach(b => {
+      const opt = document.createElement('option');
+      opt.value = b;
+      opt.textContent = `${b} (${batches[b].ticket_count})`;
+      sel.appendChild(opt);
+    });
+    sel.value = curVal;
+
+    renderQATickets(qaTickets);
+  } catch (e) {
+    console.error('Failed to load QA tickets:', e);
+  }
+}
+
+function renderQATickets(tickets) {
+  // Summary
+  const total = tickets.length;
+  const flagged = tickets.filter(t => t.status === 'flagged').length;
+  const ok = tickets.filter(t => t.status === 'ok').length;
+  const approved = tickets.filter(t => t.review_status === 'approved').length;
+  const needsRevision = tickets.filter(t => t.review_status === 'revision_needed').length;
+  const pending = tickets.filter(t => t.review_status === 'pending').length;
+
+  $('qaSummaryCards').innerHTML =
+    metricCard('Total Tickets', num(total), '', 'blue') +
+    metricCard('🔴 Flagged', num(flagged), 'need attention', 'red') +
+    metricCard('🟢 No Issues', num(ok), '', 'green') +
+    metricCard('✅ Approved', num(approved), `${pending} pending · ${needsRevision} need revision`, 'green');
+
+  // Ticket cards — flagged first, then pending, then ok
+  const sorted = [...tickets].sort((a, b) => {
+    const statusOrder = {flagged: 0, pending: 1, ok: 2};
+    const reviewOrder = {pending: 0, revision_needed: 1, approved: 2};
+    const sa = statusOrder[a.status] ?? 1;
+    const sb = statusOrder[b.status] ?? 1;
+    if (sa !== sb) return sa - sb;
+    const ra = reviewOrder[a.review_status] ?? 0;
+    const rb = reviewOrder[b.review_status] ?? 0;
+    return ra - rb;
+  });
+
+  if (!sorted.length) {
+    $('qaTicketsList').innerHTML = '<div class="text-center text-muted py-5"><h5>No tickets to review</h5><p>Minerva will push ticket analyses here for your review.</p></div>';
+    return;
+  }
+
+  $('qaTicketsList').innerHTML = sorted.map(t => renderQATicket(t)).join('');
+}
+
+function renderQATicket(t) {
+  const statusClass = t.status === 'flagged' ? 'flagged' : t.status === 'ok' ? 'ok' : 'pending';
+  const statusEmoji = t.status === 'flagged' ? '🔴' : t.status === 'ok' ? '🟢' : '⚪';
+  const priorityBadge = t.priority === 'high' ? '<span class="badge bg-danger ms-2">HIGH</span>'
+    : t.priority === 'medium' ? '<span class="badge bg-warning text-dark ms-2">MEDIUM</span>' : '';
+
+  const reviewBadge = t.review_status === 'approved'
+    ? '<span class="qa-review-badge approved rounded-pill">✅ Approved</span>'
+    : t.review_status === 'revision_needed'
+    ? '<span class="qa-review-badge revision_needed rounded-pill">🔄 Needs Revision</span>'
+    : '<span class="qa-review-badge pending rounded-pill">⏳ Pending Review</span>';
+
+  const ticketLink = t.ticket_url
+    ? `<a href="${esc(t.ticket_url)}" target="_blank">#${esc(t.ticket_id)}</a>`
+    : `#${esc(t.ticket_id)}`;
+
+  const categories = (t.categories || []).map(c => {
+    const color = c.toLowerCase().includes('sla') ? 'danger'
+      : c.toLowerCase().includes('unresolved') ? 'warning'
+      : c.toLowerCase().includes('tone') ? 'info'
+      : 'secondary';
+    return `<span class="badge bg-${color}">${esc(c)}</span>`;
+  }).join('');
+
+  const comments = (t.comments || []).map(c =>
+    `<div class="comment">
+      <span class="comment-author">${esc(c.author)}</span>
+      <span class="comment-time ms-2">${c.created_at ? new Date(c.created_at).toLocaleString() : ''}</span>
+      <p class="mb-0 mt-1">${esc(c.text)}</p>
+    </div>`
+  ).join('');
+
+  return `
+  <div class="qa-ticket ${statusClass}" id="qa-ticket-${esc(t.ticket_id)}">
+    <div class="ticket-header">
+      <div>
+        <span class="ticket-id">${statusEmoji} ${ticketLink}</span>
+        ${priorityBadge}
+        <span class="ms-2">${reviewBadge}</span>
+      </div>
+      <div class="ticket-meta">
+        <strong>${esc(t.customer || '')}</strong> · Agent: <strong>${esc(t.agent || '')}</strong>
+        ${t.batch ? `<br><small class="text-muted">Batch: ${esc(t.batch)}</small>` : ''}
+      </div>
+    </div>
+
+    <div class="categories">${categories}</div>
+
+    <div class="analysis-text">${esc(t.summary || '')}</div>
+
+    ${t.suggested_fix ? `<div class="suggested-fix"><strong>💡 Suggested Fix:</strong> ${esc(t.suggested_fix)}</div>` : ''}
+
+    <div class="review-actions">
+      <button class="btn btn-sm btn-success" onclick="setQAReview('${esc(t.ticket_id)}', 'approved')" ${t.review_status === 'approved' ? 'disabled' : ''}>✅ Approve</button>
+      <button class="btn btn-sm btn-warning" onclick="setQAReview('${esc(t.ticket_id)}', 'revision_needed')" ${t.review_status === 'revision_needed' ? 'disabled' : ''}>🔄 Needs Revision</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="setQAReview('${esc(t.ticket_id)}', 'pending')">Reset</button>
+    </div>
+
+    <div class="comments-section">
+      <strong class="small">Comments</strong>
+      <div id="comments-${esc(t.ticket_id)}">${comments || '<p class="text-muted small">No comments yet</p>'}</div>
+      <div class="d-flex gap-2 mt-2">
+        <input class="form-control form-control-sm" id="comment-input-${esc(t.ticket_id)}" placeholder="Add a comment..." onkeydown="if(event.key==='Enter')addQAComment('${esc(t.ticket_id)}')" />
+        <button class="btn btn-sm btn-primary" onclick="addQAComment('${esc(t.ticket_id)}')">Send</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function setQAReview(ticketId, status) {
+  try {
+    await fetch(`/api/qa/tickets/${encodeURIComponent(ticketId)}/review`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({review_status: status})
+    });
+    loadQATickets();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function addQAComment(ticketId) {
+  const input = $('comment-input-' + ticketId);
+  if (!input || !input.value.trim()) return;
+  try {
+    await fetch(`/api/qa/tickets/${encodeURIComponent(ticketId)}/comment`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: input.value.trim(), author: 'Valentina'})
+    });
+    input.value = '';
+    loadQATickets();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Load QA tickets when tab is clicked
+document.addEventListener('DOMContentLoaded', () => {
+  const qaTab = document.getElementById('qaTabLink');
+  if (qaTab) {
+    qaTab.addEventListener('shown.bs.tab', () => loadQATickets());
+  }
+  // Auto-open QA if URL has ?qa
+  if (window.location.search.includes('qa')) {
+    showQADirect();
+  }
+});
+
+function showQADirect() {
+  // Show results section with only QA tab active
+  document.getElementById('upload-section').style.display = 'none';
+  document.getElementById('results').style.display = 'block';
+  document.getElementById('btnReset').style.display = 'inline-block';
+  document.getElementById('btnQADirect').style.display = 'none';
+  // Activate QA tab
+  const qaTab = document.getElementById('qaTabLink');
+  if (qaTab) {
+    const tab = new bootstrap.Tab(qaTab);
+    tab.show();
+  }
+  loadQATickets();
+}
 </script>
 </body>
 </html>
