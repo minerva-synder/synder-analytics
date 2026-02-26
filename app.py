@@ -3,7 +3,7 @@ Synder Analytics — Retention & Health Dashboard
 Flask app: two CSVs → two dashboards.
 """
 
-import os, json, re, math, traceback
+import os, json, re, math, traceback, csv
 from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
@@ -156,6 +156,27 @@ def _s(df, col):
     if df.empty or col not in df.columns:
         return 0.0
     return float(df[col].sum())
+
+
+def read_csv_safe(file_obj):
+    """Read CSV handling leading-space-before-quotes issue.
+    Uses Python csv module with skipinitialspace=True, then builds DataFrame."""
+    text = file_obj.read()
+    if isinstance(text, bytes):
+        text = text.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(StringIO(text), skipinitialspace=True)
+    rows = list(reader)
+    if not rows:
+        return pd.DataFrame()
+    header = [h.strip() for h in rows[0]]
+    data = []
+    for r in rows[1:]:
+        if len(r) == len(header):
+            data.append(r)
+        elif len(r) > len(header):
+            data.append(r[:len(header)])  # truncate extra fields
+        # skip rows with fewer fields than header
+    return pd.DataFrame(data, columns=header)
 
 
 # Column maps
@@ -562,7 +583,7 @@ def analyze():
         if not csv1:
             return jsonify({"error": "CSV #1 is required"}), 400
 
-        mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
+        mrr_raw = read_csv_safe(csv1)
 
         # Try wide-format detection first (date-paired plan/amount columns)
         wide = detect_wide_format(mrr_raw)
@@ -581,7 +602,7 @@ def analyze():
 
         orgs, w2 = None, []
         if csv2:
-            orgs_raw = pd.read_csv(csv2, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
+            orgs_raw = read_csv_safe(csv2)
             orgs, w2 = map_cols(orgs_raw, ORGS_MAP)
             if "org_id" in orgs.columns:
                 orgs["org_id"] = orgs["org_id"].astype(str).str.strip()
@@ -622,7 +643,7 @@ def growth_signals():
     try:
         csv1 = request.files.get("csv1")
         if csv1:
-            mrr_raw = pd.read_csv(csv1, on_bad_lines="skip", engine="python", sep=",", quotechar='"')
+            mrr_raw = read_csv_safe(csv1)
             wide = detect_wide_format(mrr_raw)
             if wide is not None:
                 mrr = wide
