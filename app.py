@@ -686,47 +686,103 @@ def _research_growth_iter(org_names, max_orgs=500):
         s = _html.unescape(s)
         return re.sub(r"\s+", " ", s).strip()
 
+    def _resolve_ddg_redirect(u):
+        # Extract uddg=... from duckduckgo redirect links
+        try:
+            pu = urlparse(u)
+            qs = parse_qs(pu.query)
+            if "uddg" in qs and qs["uddg"]:
+                return qs["uddg"][0]
+        except Exception:
+            pass
+        return u
+
     def ddg_lite_search(query, max_results=6):
-        q = urllib.parse.quote_plus(query)
-        url = f"https://lite.duckduckgo.com/lite/?q={q}"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
+        """Best-effort search.
 
+        1) Try direct DuckDuckGo Lite HTML.
+        2) If blocked/throttled, fall back to r.jina.ai proxy (markdown extraction).
+        """
         out = []
-        # Find result links and then the next snippet row
-        pat = r"<a[^>]*class='result-link'[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>|<a[^>]*href=\"([^\"]+)\"[^>]*class='result-link'[^>]*>(.*?)</a>"
-        for m in re.finditer(pat, raw, flags=re.I | re.S):
-            href = m.group(1) or m.group(3) or ""
-            title = _strip_tags(m.group(2) or m.group(4) or "")
 
-            # Resolve DDG redirect → real URL
-            if href.startswith("//"):
-                href2 = "https:" + href
-            else:
-                href2 = href
+        def _direct():
+            q = urllib.parse.quote_plus(query)
+            url = f"https://lite.duckduckgo.com/lite/?q={q}"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            })
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
 
-            real_url = href2
-            try:
-                pu = urlparse(href2)
-                qs = parse_qs(pu.query)
-                if "uddg" in qs and qs["uddg"]:
-                    real_url = qs["uddg"][0]
-            except Exception:
-                pass
+            # If DDG serves an interstitial/blocked page, it usually won't include result-link.
+            if "result-link" not in raw:
+                return []
 
-            # Snippet typically appears in the next result-snippet cell after this link
-            snippet = ""
-            m2 = re.search(r"class='result-snippet'>(.*?)</td>", raw[m.end():], flags=re.I | re.S)
-            if m2:
-                snippet = _strip_tags(m2.group(1))
+            pat = r"<a[^>]*class='result-link'[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>|<a[^>]*href=\"([^\"]+)\"[^>]*class='result-link'[^>]*>(.*?)</a>"
+            res = []
+            for m in re.finditer(pat, raw, flags=re.I | re.S):
+                href = m.group(1) or m.group(3) or ""
+                title = _strip_tags(m.group(2) or m.group(4) or "")
 
-            out.append({"title": title, "body": snippet, "url": real_url})
-            if len(out) >= max_results:
-                break
+                href2 = ("https:" + href) if href.startswith("//") else href
+                real_url = _resolve_ddg_redirect(href2)
+
+                snippet = ""
+                m2 = re.search(r"class='result-snippet'>(.*?)</td>", raw[m.end():], flags=re.I | re.S)
+                if m2:
+                    snippet = _strip_tags(m2.group(1))
+
+                # Skip obvious sponsored results
+                if "Sponsored link" in snippet:
+                    continue
+
+                res.append({"title": title, "body": snippet, "url": real_url})
+                if len(res) >= max_results:
+                    break
+            return res
+
+        def _proxy():
+            q = urllib.parse.quote_plus(query)
+            url = f"https://r.jina.ai/http://https://lite.duckduckgo.com/lite/?q={q}"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            })
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+
+            res = []
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            i = 0
+            while i < len(lines):
+                m = re.match(r"^(\d+)\.\[(.*?)\]\((.*?)\)", lines[i])
+                if m:
+                    title = _strip_tags(m.group(2))
+                    href = m.group(3)
+                    href2 = href
+                    if href2.startswith("//"):
+                        href2 = "https:" + href2
+                    real_url = _resolve_ddg_redirect(href2)
+
+                    snippet = ""
+                    if i + 1 < len(lines) and not re.match(r"^\d+\.\[", lines[i + 1]):
+                        snippet = _strip_tags(lines[i + 1])
+
+                    # Skip sponsored
+                    if "Sponsored link" in lines[i] or "Sponsored link" in snippet:
+                        i += 1
+                        continue
+
+                    res.append({"title": title, "body": snippet, "url": real_url})
+                    if len(res) >= max_results:
+                        break
+                i += 1
+            return res
+
+        out = _direct()
+        if not out:
+            out = _proxy()
 
         return out
 
@@ -772,7 +828,7 @@ def _research_growth_iter(org_names, max_orgs=500):
 
         # Detect event type
         etype, conf = None, "low"
-        if any(k in text for k in ["series a", "series b", "series c", "series d", "seed round", "pre-seed", "raised", "funding round", "venture", "investment", "backed by"]):
+        if any(k in text for k in ["series a", "series b", "series c", "series d", "seed round", "pre-seed", "raised", "funding round", "funding", "venture", "investment", "backed by", "post-money valuation", "valuation", "deal"]):
             etype, conf = "funding", "medium"
         if any(k in text for k in ["acquired", "acquisition", "acquires", "buyout"]):
             etype, conf = "acquisition", "medium"
