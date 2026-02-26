@@ -861,13 +861,22 @@ function renderGrowthSignals(signals) {
     {key:'event_date', label:'Date'},
     {key:'confidence', label:'Confidence', fmt: v => {
       const colors = {high:'success', medium:'warning', low:'secondary'};
-      return `<span class="badge bg-${colors[v]||'secondary'}">${v||'—'}</span>`;
+      const vv = (v || 'low');
+      return `<span class="badge bg-${colors[vv]||'secondary'}">${vv}</span>`;
     }},
     {key:'sources', label:'Sources', fmt: v => {
       if (!v || !v.length) return '—';
-      return v.map(s => `<a href="${s.url}" target="_blank" class="small">${(s.title||'link').substring(0,40)}</a>`).join('<br>');
+      return v.map(s => `<a href="${s.url}" target="_blank" rel="noopener noreferrer" class="small">${(s.title||'link').substring(0,60)}</a>`).join('<br>');
     }},
-  ]);
+  ], { tableId: 'tbl_growth_signals', sortable: true });
+
+  // Default sort by Confidence (high → low)
+  setTimeout(() => {
+    try {
+      tableSortState['tbl_growth_signals'] = { col: 4, dir: 'asc' }; // next click toggles to desc
+      sortTable('tbl_growth_signals', 4);
+    } catch (e) {}
+  }, 0);
 
   $('growthTable').innerHTML = html;
 }
@@ -883,6 +892,13 @@ function parseSortableValue(s) {
     const t = Date.parse(s);
     if (!Number.isNaN(t)) return { type: 'date', value: t };
   }
+
+  // Confidence levels
+  const sl = s.toLowerCase();
+  if (sl === 'high') return { type: 'number', value: 3 };
+  if (sl === 'medium') return { type: 'number', value: 2 };
+  if (sl === 'low') return { type: 'number', value: 1 };
+  if (sl === 'none') return { type: 'number', value: 0 };
 
   // Month-name dates (e.g., "February 12, 2026")
   // Date.parse can handle these in modern browsers; gate on letters to avoid mis-parsing plain numbers.

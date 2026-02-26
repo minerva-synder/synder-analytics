@@ -669,6 +669,24 @@ def _research_growth_iter(org_names, max_orgs=500):
 
     ddgs = DDGS()
 
+    TRUSTED_DOMAINS = {
+        "crunchbase.com", "techcrunch.com", "venturebeat.com", "prnewswire.com", "businesswire.com",
+        "globenewswire.com", "marketwatch.com", "reuters.com", "bloomberg.com", "sec.gov"
+    }
+
+    def _get(d, *keys):
+        for k in keys:
+            v = d.get(k)
+            if v is not None and str(v).strip() != "":
+                return v
+        return ""
+
+    def _domain(u):
+        try:
+            return urlparse(u).netloc.replace("www.", "")
+        except Exception:
+            return ""
+
     for org in org_names[:max_orgs]:
         if not org or str(org).strip() == "":
             continue
@@ -676,33 +694,51 @@ def _research_growth_iter(org_names, max_orgs=500):
         # Gentle pacing helps avoid being throttled/banned by the search provider.
         time.sleep(0.35)
 
-        query = f'"{org}" (funding OR acquisition OR merger OR "series" OR investment OR IPO) 2024 OR 2025 OR 2026'
+        queries = [
+            f'"{org}" (raised OR funding OR "funding round" OR investment OR "series" OR acquired OR acquisition OR merger OR IPO)',
+            f'"{org}" ("Series A" OR "Series B" OR "Series C" OR seed OR pre-seed OR funding)',
+            f'"{org}" (acquired OR acquisition OR merger)',
+        ]
 
-        sr = None
+        sr = []
         last_err = None
-        for attempt in range(3):
-            try:
-                sr = list(ddgs.text(query, max_results=5))
-                last_err = None
+        for qi, query in enumerate(queries):
+            # Retry each query a couple of times.
+            for attempt in range(2):
+                try:
+                    got = list(ddgs.text(query, max_results=6))
+                    if got:
+                        sr = got
+                        last_err = None
+                        break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(1.25 * (attempt + 1) ** 2)
+            if sr:
                 break
-            except Exception as e:
-                last_err = e
-                # Backoff on errors (rate limit / temporary blocks)
-                time.sleep(1.5 * (attempt + 1) ** 2)
 
-        if last_err is not None and sr is None:
+        if last_err is not None and not sr:
             yield {"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {last_err}", "event_date": None, "confidence": "low", "sources": []}
             continue
 
         if not sr:
-            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified signals found", "event_date": None, "confidence": "low", "sources": []}
+            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified growth signals found", "event_date": None, "confidence": "low", "sources": []}
             continue
 
-        combined_raw = " ".join([(r.get("title", "") or "") + " " + (r.get("body", "") or "") for r in sr])
+        # Normalize fields across library versions
+        norm = []
+        for r in sr:
+            title = str(_get(r, "title", "headline", "name") or "")
+            body = str(_get(r, "body", "snippet", "description", "content") or "")
+            url = str(_get(r, "href", "url", "link") or "")
+            norm.append({"title": title, "body": body, "url": url})
+
+        combined_raw = " ".join([(n.get("title", "") + " " + n.get("body", "")).strip() for n in norm if (n.get("title") or n.get("body"))])
         text = combined_raw.lower()
 
+        # Detect event type
         etype, conf = None, "low"
-        if any(k in text for k in ["series a", "series b", "series c", "series d", "seed round", "pre-seed", "raised", "funding round", "venture", "investment"]):
+        if any(k in text for k in ["series a", "series b", "series c", "series d", "seed round", "pre-seed", "raised", "funding round", "venture", "investment", "backed by"]):
             etype, conf = "funding", "medium"
         if any(k in text for k in ["acquired", "acquisition", "acquires", "buyout"]):
             etype, conf = "acquisition", "medium"
@@ -711,35 +747,50 @@ def _research_growth_iter(org_names, max_orgs=500):
         if any(k in text for k in ["ipo", "went public", "public offering"]):
             etype, conf = "IPO", "medium"
 
-        # Prefer an amount with context (e.g., $35M / $35 million)
-        amounts = re.findall(r'\$\s*[\d,.]+\s*(?:million|billion|m|b)', combined_raw, flags=re.I)
-        amount = amounts[0].replace(" ", "") if amounts else None
+        # Amount extraction (handles "$35M" and "35 million")
+        amount = None
+        m1 = re.search(r'\$\s*[\d,.]+\s*(?:million|billion|m|b)', combined_raw, flags=re.I)
+        if m1:
+            amount = re.sub(r"\s+", "", m1.group(0))
+        else:
+            m2 = re.search(r'\b([\d]{1,3}(?:[\d,.]{0,6})?)\s*(million|billion)\b', combined_raw, flags=re.I)
+            if m2:
+                # assume USD for readability; best-effort
+                num = m2.group(1).replace(",", "")
+                mult = m2.group(2).lower()
+                suffix = "M" if mult.startswith("m") else "B"
+                amount = f"${num}{suffix}"
+
         if amount:
-            # normalize m/b suffix to upper for readability
+            # normalize m/b suffix
             amount = re.sub(r'\bm\b', 'M', amount, flags=re.I)
             amount = re.sub(r'\bb\b', 'B', amount, flags=re.I)
-            conf = "high"
+            conf = "high" if etype else "medium"
 
         # Round type (best-effort)
         round_type = None
         m = re.search(r'(series\s+[abcd]|seed|pre-seed)', text)
         if m:
-            round_type = m.group(1).title().replace('Series ', 'Series ')
+            rt = m.group(1).lower()
+            round_type = rt.title().replace("Series ", "Series ")
 
-        dm = re.search(r'(20(?:24|25|26))', text)
+        # Date (best-effort): keep year
+        dm = re.search(r'(20(?:2\d))', text)
         year = dm.group(1) if dm else None
 
-        sources = [{"title": r.get("title", ""), "url": r.get("href", "")} for r in sr[:3]]
-
-        # Human-readable summary
+        sources = [{"title": n.get("title", ""), "url": n.get("url", "")} for n in norm[:3]]
         top_title = (sources[0].get("title") if sources else "") or ""
         top_url = (sources[0].get("url") if sources else "") or ""
-        domain = ""
-        try:
-            domain = urlparse(top_url).netloc.replace("www.", "")
-        except Exception:
-            domain = ""
+        domain = _domain(top_url)
 
+        # Boost confidence if we have a trusted source
+        if domain in TRUSTED_DOMAINS and etype and conf == "medium":
+            conf = "high" if amount else "medium"
+        if domain in TRUSTED_DOMAINS and not etype:
+            # at least we found a serious business source, keep medium
+            conf = "medium"
+
+        # Human-readable summary
         if not etype:
             summary = "No verified growth signals found"
         elif etype == "funding":
@@ -747,6 +798,8 @@ def _research_growth_iter(org_names, max_orgs=500):
                 summary = f"Likely raised {amount} in a {round_type} funding round ({year})."
             elif amount and year:
                 summary = f"Likely raised {amount} in a funding round ({year})."
+            elif amount:
+                summary = f"Likely raised {amount} in a funding round."
             elif year:
                 summary = f"Likely announced fundraising activity ({year})."
             else:
@@ -768,7 +821,7 @@ def _research_growth_iter(org_names, max_orgs=500):
         yield {
             "org_name": org,
             "detected_growth_event_type": etype,
-            "event_summary": summary[:320],
+            "event_summary": summary[:340],
             "event_date": year if year and etype else None,
             "confidence": conf,
             "sources": sources,
