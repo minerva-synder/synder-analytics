@@ -90,6 +90,11 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 .data-table td { vertical-align: middle; }
 .table-wrapper { max-height: 500px; overflow-y: auto; border-radius: 8px; border: 1px solid var(--border); }
 
+/* Sortable headers */
+.data-table th.sortable { cursor: pointer; user-select: none; }
+.data-table th.sortable:hover { background: #E2E8F0; }
+.data-table th .sort-indicator { margin-left: 6px; font-size: 0.75em; color: var(--text-muted); }
+
 /* Risk badges */
 .badge-risk { font-size: 0.75rem; }
 
@@ -307,6 +312,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 let file1 = null, file2 = null;
 let analysisResult = null;
 let nrrBreakdownData = [], expansionData = [], churnData = [], atRiskData = [], growthData = [];
+
+// Table sorting state (per table id)
+let tableSortState = {};
 
 // Drill-down store for clickable metric cards
 let detailsStore = {};
@@ -535,7 +543,7 @@ function renderSandbox(sb) {
     const f = sb.F_not_syncing;
     let html = metricCard('Not Syncing', num(f.count), 'MRR: ' + fmt(f.mrr), 'amber');
     if (f.accounts && f.accounts.length) {
-      html += renderSmallTable(f.accounts, ['org_id', 'org_name', 'mrr']);
+      html += renderSmallTable(f.accounts, ['org_id', 'org_name', 'mrr'], { tableId: 'tbl_sandbox_not_syncing', sortable: true });
     }
     $('sandboxNotSyncing').innerHTML = `<div class="row g-3">${html}</div>`;
   } else {
@@ -547,7 +555,7 @@ function renderSandbox(sb) {
     const g = sb.G_cancelled_will_churn;
     let html = metricCard('Will Churn', num(g.count), 'MRR at risk: ' + fmt(g.mrr_at_risk), 'red');
     if (g.accounts && g.accounts.length) {
-      html += renderSmallTable(g.accounts, ['org_id', 'org_name', 'mrr', 'subscription_end_date']);
+      html += renderSmallTable(g.accounts, ['org_id', 'org_name', 'mrr', 'subscription_end_date'], { tableId: 'tbl_sandbox_cancelled', sortable: true });
     }
     $('sandboxCancelled').innerHTML = `<div class="row g-3">${html}</div>`;
   } else {
@@ -819,11 +827,86 @@ function renderGrowthSignals(signals) {
 }
 
 // ---- Table Helpers ----
-function renderTable(rows, cols) {
+function parseSortableValue(s) {
+  if (s == null) return { type: 'string', value: '' };
+  s = String(s).trim();
+  if (!s) return { type: 'string', value: '' };
+
+  // Date-like (prefer YYYY-MM-DD)
+  if (/\d{4}-\d{2}-\d{2}/.test(s)) {
+    const t = Date.parse(s);
+    if (!Number.isNaN(t)) return { type: 'date', value: t };
+  }
+
+  // Number-like (currency/percent/commas)
+  const numStr = s.replace(/[$,%]/g, '').replace(/,/g, '').trim();
+  if (/^-?\d+(\.\d+)?$/.test(numStr)) {
+    return { type: 'number', value: parseFloat(numStr) };
+  }
+
+  return { type: 'string', value: s.toLowerCase() };
+}
+
+function updateSortIndicators(table, state) {
+  if (!table || !table.tHead || !table.tHead.rows.length) return;
+  const ths = Array.from(table.tHead.rows[0].cells);
+  ths.forEach((th, i) => {
+    const span = th.querySelector('.sort-indicator');
+    if (!span) return;
+    if (i === state.col) span.textContent = state.dir === 'asc' ? '▲' : '▼';
+    else span.textContent = '';
+  });
+}
+
+function sortTable(tableId, colIndex) {
+  const table = document.getElementById(tableId);
+  if (!table || !table.tBodies || !table.tBodies.length) return;
+
+  const prev = tableSortState[tableId] || { col: colIndex, dir: 'asc' };
+  const next = { col: colIndex, dir: 'asc' };
+  if (prev.col === colIndex) next.dir = prev.dir === 'asc' ? 'desc' : 'asc';
+  tableSortState[tableId] = next;
+
+  const dirMult = next.dir === 'asc' ? 1 : -1;
+  const tbody = table.tBodies[0];
+  const rows = Array.from(tbody.rows);
+
+  rows.sort((ra, rb) => {
+    const aCell = ra.cells[colIndex];
+    const bCell = rb.cells[colIndex];
+    const a = parseSortableValue(aCell ? aCell.textContent : '');
+    const b = parseSortableValue(bCell ? bCell.textContent : '');
+
+    if (a.type === b.type) {
+      if (a.type === 'number' || a.type === 'date') return (a.value - b.value) * dirMult;
+      return String(a.value).localeCompare(String(b.value)) * dirMult;
+    }
+    // Fallback to string compare if mixed
+    return String(a.value).localeCompare(String(b.value)) * dirMult;
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
+  updateSortIndicators(table, next);
+}
+
+function renderTable(rows, cols, opts) {
+  opts = opts || {};
+  const sortable = !!opts.sortable;
+  const tableId = opts.tableId || '';
+
   if (!rows || !rows.length) return '<p class="text-muted small p-3">No data</p>';
-  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
-  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  let html = `<table ${tableId ? `id="${tableId}"` : ''} class="table table-sm table-hover data-table mb-0"><thead><tr>`;
+
+  cols.forEach((c, idx) => {
+    if (sortable && tableId) {
+      html += `<th class="sortable" onclick="sortTable('${tableId}', ${idx})">${c.label}<span class="sort-indicator"></span></th>`;
+    } else {
+      html += `<th>${c.label}</th>`;
+    }
+  });
+
   html += '</tr></thead><tbody>';
+
   rows.forEach(row => {
     html += '<tr>';
     cols.forEach(c => {
@@ -837,9 +920,11 @@ function renderTable(rows, cols) {
   return html;
 }
 
-function renderSmallTable(rows, keys) {
+function renderSmallTable(rows, keys, opts) {
   if (!rows || !rows.length) return '';
-  return `<div class="col-12"><div class="table-wrapper mt-2">${renderTable(rows, keys.map(k => ({key:k, label:k, fmt: k==='mrr' ? fmt : undefined})))}</div></div>`;
+  opts = opts || {};
+  const cols = keys.map(k => ({ key: k, label: k, fmt: k === 'mrr' ? fmt : undefined }));
+  return `<div class="col-12"><div class="table-wrapper mt-2">${renderTable(rows, cols, opts)}</div></div>`;
 }
 
 // ---- Export CSV ----
