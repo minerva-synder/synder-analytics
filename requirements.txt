@@ -1,4 +1,4 @@
-flask>=3.0
-pandas>=2.0
-gunicorn>=22.0
-duckduckgo-search>=7.0
+flask>=3.0,<4
+pandas>=2.0,<3
+gunicorn>=21,<24
+duckduckgo-search>=7,<9
