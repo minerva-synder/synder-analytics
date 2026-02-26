@@ -270,7 +270,7 @@ def read_csv_safe(file_obj):
 # Column maps
 MRR_MAP = {
     "org_id": ["org_id", "organization_id", "id"],
-    "org_name": ["org_name", "organization_name", "name", "company"],
+    "org_name": ["org_name", "organization_name", "organization name", "name", "company"],
     "start_plan": ["start_plan", "plan_start", "plan_feb1", "starting_plan"],
     "start_mrr": ["start_mrr", "mrr_start", "mrr_feb1", "starting_mrr"],
     "end_plan": ["end_plan", "plan_end", "plan_current", "current_plan", "ending_plan"],
