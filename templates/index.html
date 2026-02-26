@@ -734,40 +734,64 @@ async function runGrowthSignals() {
   $('btnGrowth').disabled = true;
   $('btnGrowth').textContent = '⏳ Researching...';
   $('growthProgress').style.display = 'block';
-  $('growthBar').style.width = '10%';
-  $('growthStatus').textContent = 'Sending org names for web research...';
+  $('growthBar').style.width = '0%';
+  $('growthStatus').textContent = 'Starting web research job...';
 
   const fd = new FormData();
   fd.append('csv1', file1);
 
   try {
-    // Simulate progress while waiting
-    let pct = 10;
-    const interval = setInterval(() => {
-      pct = Math.min(pct + 2, 90);
-      $('growthBar').style.width = pct + '%';
-      $('growthStatus').textContent = `Searching the web for growth signals... (${Math.round(pct)}%)`;
-    }, 2000);
-
-    const resp = await fetch('/api/growth-signals', { method: 'POST', body: fd });
-    clearInterval(interval);
-
-    const data = await resp.json();
-    $('growthBar').style.width = '100%';
-
-    if (data.error) {
-      $('growthStatus').textContent = 'Error: ' + data.error;
-    } else {
-      $('growthStatus').textContent = `Done! Searched ${data.total_searched} organizations.`;
-      growthData = data.signals;
-      renderGrowthSignals(data.signals);
+    const startResp = await fetch('/api/growth-start', { method: 'POST', body: fd });
+    if (!startResp.ok) {
+      const txt = await startResp.text();
+      throw new Error(txt.slice(0, 200));
     }
+    const startData = await startResp.json();
+    if (startData.error) throw new Error(startData.error);
+
+    const jobId = startData.job_id;
+    const total = startData.total || 0;
+
+    $('growthStatus').textContent = `Running live research for ${total} organizations...`;
+
+    // Poll status
+    const pollEveryMs = 2000;
+    const poll = async () => {
+      const stResp = await fetch(`/api/growth-status?job_id=${encodeURIComponent(jobId)}`);
+      if (!stResp.ok) {
+        const txt = await stResp.text();
+        throw new Error(txt.slice(0, 200));
+      }
+      const st = await stResp.json();
+      if (st.error) throw new Error(st.error);
+
+      const done = st.completed || 0;
+      const tot = st.total || total || 0;
+      const pct = tot ? Math.round((done / tot) * 100) : 0;
+      $('growthBar').style.width = pct + '%';
+      $('growthStatus').textContent = `Searching the web... ${done}/${tot}`;
+
+      if (st.status === 'done') {
+        $('growthBar').style.width = '100%';
+        $('growthStatus').textContent = `Done! Searched ${tot} organizations.`;
+        growthData = st.signals || [];
+        renderGrowthSignals(growthData);
+        $('btnGrowth').disabled = false;
+        $('btnGrowth').textContent = '🔍 Run Live Research';
+        return;
+      }
+      if (st.status === 'error') {
+        throw new Error(st.error || 'Unknown error');
+      }
+      setTimeout(poll, pollEveryMs);
+    };
+
+    setTimeout(poll, 500);
   } catch (e) {
     $('growthStatus').textContent = 'Error: ' + e.message;
+    $('btnGrowth').disabled = false;
+    $('btnGrowth').textContent = '🔍 Run Live Research';
   }
-
-  $('btnGrowth').disabled = false;
-  $('btnGrowth').textContent = '🔍 Run Live Research';
 }
 
 function renderGrowthSignals(signals) {

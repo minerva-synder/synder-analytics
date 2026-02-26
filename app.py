@@ -3,7 +3,7 @@ Synder Analytics — Retention & Health Dashboard
 Flask app: two CSVs → two dashboards.
 """
 
-import os, json, re, math, traceback, csv
+import os, json, re, math, traceback, csv, threading, time, uuid
 from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
@@ -13,6 +13,10 @@ from flask import Flask, render_template, request, jsonify, send_file
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+# In-memory job store for growth research (avoids request timeouts)
+GROWTH_JOBS = {}
+GROWTH_JOBS_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -644,27 +648,27 @@ def at_risk_analysis(mrr, orgs):
 # Growth Signals (web research)
 # ---------------------------------------------------------------------------
 
-def research_growth(org_names):
+def _research_growth_iter(org_names, max_orgs=50):
+    """Generator: yields one result dict per org."""
     try:
         from duckduckgo_search import DDGS
     except ImportError:
-        return {"error": "duckduckgo-search not installed"}
+        raise RuntimeError("duckduckgo-search not installed")
 
-    results = []
     ddgs = DDGS()
 
-    for org in org_names[:50]:
+    for org in org_names[:max_orgs]:
         if not org or str(org).strip() == "":
             continue
         query = f'"{org}" (funding OR acquisition OR merger OR "series" OR investment OR IPO) 2024 OR 2025 OR 2026'
         try:
             sr = list(ddgs.text(query, max_results=5))
         except Exception as e:
-            results.append({"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {e}", "event_date": None, "confidence": "low", "sources": []})
+            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {e}", "event_date": None, "confidence": "low", "sources": []}
             continue
 
         if not sr:
-            results.append({"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified signals found", "event_date": None, "confidence": "low", "sources": []})
+            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified signals found", "event_date": None, "confidence": "low", "sources": []}
             continue
 
         text = " ".join([r.get("body", "") + " " + r.get("title", "") for r in sr]).lower()
@@ -689,14 +693,17 @@ def research_growth(org_names):
         if amounts:
             summary = f"{amounts[0]}. {summary}"
 
-        results.append({
+        yield {
             "org_name": org, "detected_growth_event_type": etype,
             "event_summary": summary[:300],
             "event_date": dm.group(0) if dm and etype else None,
             "confidence": conf, "sources": sources,
-        })
+        }
 
-    return {"signals": results, "total_searched": len(org_names[:50])}
+
+def research_growth(org_names, max_orgs=50):
+    results = list(_research_growth_iter(org_names, max_orgs=max_orgs))
+    return {"signals": results, "total_searched": len(org_names[:max_orgs])}
 
 
 # ---------------------------------------------------------------------------
@@ -771,27 +778,107 @@ def analyze():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
-@app.route("/api/growth-signals", methods=["POST"])
-def growth_signals():
-    try:
-        csv1 = request.files.get("csv1")
-        if csv1:
-            mrr_raw = read_csv_safe(csv1)
-            wide = detect_wide_format(mrr_raw)
-            if wide is not None:
-                mrr = wide
-            else:
-                mrr, _ = map_cols(mrr_raw, MRR_MAP)
-            names = mrr["org_name"].dropna().unique().tolist() if "org_name" in mrr.columns else []
+def _names_from_request():
+    csv1 = request.files.get("csv1")
+    if csv1:
+        mrr_raw = read_csv_safe(csv1)
+        wide = detect_wide_format(mrr_raw)
+        if wide is not None:
+            mrr = wide
         else:
-            data = request.get_json(silent=True)
-            names = data.get("org_names", []) if data else []
+            mrr, _ = map_cols(mrr_raw, MRR_MAP)
+        names = mrr["org_name"].dropna().unique().tolist() if "org_name" in mrr.columns else []
+    else:
+        data = request.get_json(silent=True)
+        names = data.get("org_names", []) if data else []
+    return names
+
+
+def _growth_worker(job_id, names, max_orgs=50):
+    started = time.time()
+    try:
+        results = []
+        total = min(len(names), max_orgs)
+        for idx, item in enumerate(_research_growth_iter(names, max_orgs=max_orgs), start=1):
+            results.append(item)
+            with GROWTH_JOBS_LOCK:
+                job = GROWTH_JOBS.get(job_id, {})
+                job.update({
+                    "status": "running",
+                    "completed": idx,
+                    "total": total,
+                    "signals": results,
+                    "updated_at": time.time(),
+                })
+                GROWTH_JOBS[job_id] = job
+        with GROWTH_JOBS_LOCK:
+            job = GROWTH_JOBS.get(job_id, {})
+            job.update({
+                "status": "done",
+                "completed": total,
+                "total": total,
+                "signals": results,
+                "duration_sec": round(time.time() - started, 2),
+                "updated_at": time.time(),
+            })
+            GROWTH_JOBS[job_id] = job
+    except Exception as e:
+        with GROWTH_JOBS_LOCK:
+            job = GROWTH_JOBS.get(job_id, {})
+            job.update({
+                "status": "error",
+                "error": str(e),
+                "updated_at": time.time(),
+            })
+            GROWTH_JOBS[job_id] = job
+
+
+@app.route("/api/growth-start", methods=["POST"])
+def growth_start():
+    try:
+        names = _names_from_request()
         if not names:
             return jsonify({"error": "No org names found"}), 400
-        return jsonify({"success": True, **research_growth(names)})
+
+        max_orgs = int(request.args.get("max_orgs", 50))
+        max_orgs = max(1, min(max_orgs, 50))
+
+        job_id = str(uuid.uuid4())
+        total = min(len(names), max_orgs)
+        with GROWTH_JOBS_LOCK:
+            GROWTH_JOBS[job_id] = {
+                "status": "queued",
+                "completed": 0,
+                "total": total,
+                "signals": [],
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+
+        t = threading.Thread(target=_growth_worker, args=(job_id, names, max_orgs), daemon=True)
+        t.start()
+        return jsonify({"success": True, "job_id": job_id, "total": total})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/growth-status", methods=["GET"])
+def growth_status():
+    job_id = request.args.get("job_id")
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+    with GROWTH_JOBS_LOCK:
+        job = GROWTH_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify({"success": True, **job})
+
+
+# Backwards compatibility: keep /api/growth-signals but make it start an async job
+@app.route("/api/growth-signals", methods=["POST"])
+def growth_signals():
+    return growth_start()
 
 
 @app.route("/api/export-csv/<section>", methods=["POST"])
