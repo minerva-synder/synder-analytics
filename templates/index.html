@@ -745,6 +745,35 @@ function renderAtRisk(ar) {
 }
 
 // ---- Growth Signals ----
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function fetchJsonWithRetry(url, opts, retries=2) {
+  let lastText = '';
+  for (let i = 0; i <= retries; i++) {
+    const resp = await fetch(url, opts);
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+
+    // Try JSON path first
+    if (ct.includes('application/json')) {
+      const data = await resp.json();
+      if (!resp.ok) throw new Error((data && data.error) ? data.error : `HTTP ${resp.status}`);
+      return data;
+    }
+
+    // Non-JSON response (often happens on cold starts/proxy error pages)
+    lastText = await resp.text();
+    if (resp.ok && i < retries) {
+      // Service may be warming up — retry
+      await sleep(1200 * (i + 1));
+      continue;
+    }
+    // If not ok, or retries exhausted, surface the text
+    const snippet = (lastText || '').replace(/\s+/g, ' ').slice(0, 220);
+    throw new Error(`Server returned non-JSON (HTTP ${resp.status}). ${snippet}`);
+  }
+  throw new Error(lastText ? lastText.slice(0, 220) : 'Unknown error');
+}
+
 async function runGrowthSignals() {
   if (!file1) return;
   $('btnGrowth').disabled = true;
@@ -757,12 +786,7 @@ async function runGrowthSignals() {
   fd.append('csv1', file1);
 
   try {
-    const startResp = await fetch('/api/growth-start', { method: 'POST', body: fd });
-    if (!startResp.ok) {
-      const txt = await startResp.text();
-      throw new Error(txt.slice(0, 200));
-    }
-    const startData = await startResp.json();
+    const startData = await fetchJsonWithRetry('/api/growth-start', { method: 'POST', body: fd }, 3);
     if (startData.error) throw new Error(startData.error);
 
     const jobId = startData.job_id;
@@ -773,12 +797,7 @@ async function runGrowthSignals() {
     // Poll status
     const pollEveryMs = 2000;
     const poll = async () => {
-      const stResp = await fetch(`/api/growth-status?job_id=${encodeURIComponent(jobId)}`);
-      if (!stResp.ok) {
-        const txt = await stResp.text();
-        throw new Error(txt.slice(0, 200));
-      }
-      const st = await stResp.json();
+      const st = await fetchJsonWithRetry(`/api/growth-status?job_id=${encodeURIComponent(jobId)}`, {}, 3);
       if (st.error) throw new Error(st.error);
 
       const done = st.completed || 0;
