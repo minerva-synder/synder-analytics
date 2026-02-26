@@ -502,6 +502,9 @@ def churn_prediction(mrr, orgs):
 
     wc = ic[(ic["_cd"].notna()) & (ic["_se"].notna()) & (ic["_se"] > today)].copy()
     wc["days_to_churn"] = (wc["_se"] - today).dt.days
+    wc["churn_date"] = wc["_se"].dt.date.astype(str)
+    # Keep subscription_end_date separately for display (often same as churn_date)
+    wc["subscription_end_date"] = wc["_se"].dt.date.astype(str)
 
     def bucket(d):
         if d <= 7: return "0-7 days"
@@ -525,7 +528,7 @@ def churn_prediction(mrr, orgs):
         bd = wc[wc["bucket"] == b]
         buckets.append({"bucket": b, "count": len(bd), "mrr_at_risk": money(bd["mrr"].sum())})
 
-    cols = ["org_id", "org_name", "mrr", "days_to_churn", "bucket"]
+    cols = ["org_id", "org_name", "mrr", "churn_date", "subscription_end_date", "bucket"]
     if plan_col and plan_col in wc.columns:
         wc["plan_display"] = wc[plan_col]
     if "plan_display" in wc.columns:
