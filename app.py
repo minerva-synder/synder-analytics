@@ -4,6 +4,7 @@ Flask app: two CSVs → two dashboards.
 """
 
 import os, json, re, math, traceback, csv, threading, time, uuid
+from urllib.parse import urlparse
 from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
@@ -659,7 +660,7 @@ def at_risk_analysis(mrr, orgs):
 # Growth Signals (web research)
 # ---------------------------------------------------------------------------
 
-def _research_growth_iter(org_names, max_orgs=50):
+def _research_growth_iter(org_names, max_orgs=300):
     """Generator: yields one result dict per org."""
     try:
         from duckduckgo_search import DDGS
@@ -671,6 +672,10 @@ def _research_growth_iter(org_names, max_orgs=50):
     for org in org_names[:max_orgs]:
         if not org or str(org).strip() == "":
             continue
+
+        # Gentle pacing helps avoid being throttled/banned by the search provider.
+        time.sleep(0.25)
+
         query = f'"{org}" (funding OR acquisition OR merger OR "series" OR investment OR IPO) 2024 OR 2025 OR 2026'
         try:
             sr = list(ddgs.text(query, max_results=5))
@@ -682,33 +687,80 @@ def _research_growth_iter(org_names, max_orgs=50):
             yield {"org_name": org, "detected_growth_event_type": None, "event_summary": "No verified signals found", "event_date": None, "confidence": "low", "sources": []}
             continue
 
-        text = " ".join([r.get("body", "") + " " + r.get("title", "") for r in sr]).lower()
+        combined_raw = " ".join([(r.get("title", "") or "") + " " + (r.get("body", "") or "") for r in sr])
+        text = combined_raw.lower()
 
         etype, conf = None, "low"
-        if any(k in text for k in ["series a", "series b", "series c", "series d", "raised", "funding round", "venture"]):
+        if any(k in text for k in ["series a", "series b", "series c", "series d", "seed round", "pre-seed", "raised", "funding round", "venture", "investment"]):
             etype, conf = "funding", "medium"
-        if any(k in text for k in ["acquired", "acquisition", "acquires"]):
+        if any(k in text for k in ["acquired", "acquisition", "acquires", "buyout"]):
             etype, conf = "acquisition", "medium"
         if any(k in text for k in ["merger", "merged with"]):
             etype, conf = "merger", "medium"
         if any(k in text for k in ["ipo", "went public", "public offering"]):
             etype, conf = "IPO", "medium"
 
-        amounts = re.findall(r'\$[\d,.]+\s*(?:million|billion|M|B)', text)
-        if amounts:
+        # Prefer an amount with context (e.g., $35M / $35 million)
+        amounts = re.findall(r'\$\s*[\d,.]+\s*(?:million|billion|m|b)', combined_raw, flags=re.I)
+        amount = amounts[0].replace(" ", "") if amounts else None
+        if amount:
+            # normalize m/b suffix to upper for readability
+            amount = re.sub(r'\bm\b', 'M', amount, flags=re.I)
+            amount = re.sub(r'\bb\b', 'B', amount, flags=re.I)
             conf = "high"
+
+        # Round type (best-effort)
+        round_type = None
+        m = re.search(r'(series\s+[abcd]|seed|pre-seed)', text)
+        if m:
+            round_type = m.group(1).title().replace('Series ', 'Series ')
+
         dm = re.search(r'(20(?:24|25|26))', text)
+        year = dm.group(1) if dm else None
 
         sources = [{"title": r.get("title", ""), "url": r.get("href", "")} for r in sr[:3]]
-        summary = sr[0].get("body", "")[:250] if etype else "No verified signals found"
-        if amounts:
-            summary = f"{amounts[0]}. {summary}"
+
+        # Human-readable summary
+        top_title = (sources[0].get("title") if sources else "") or ""
+        top_url = (sources[0].get("url") if sources else "") or ""
+        domain = ""
+        try:
+            domain = urlparse(top_url).netloc.replace("www.", "")
+        except Exception:
+            domain = ""
+
+        if not etype:
+            summary = "No verified growth signals found"
+        elif etype == "funding":
+            if amount and round_type and year:
+                summary = f"Likely raised {amount} in a {round_type} funding round ({year})."
+            elif amount and year:
+                summary = f"Likely raised {amount} in a funding round ({year})."
+            elif year:
+                summary = f"Likely announced fundraising activity ({year})."
+            else:
+                summary = "Likely announced fundraising activity."
+        elif etype == "acquisition":
+            summary = f"Likely involved in an acquisition{f' ({year})' if year else ''}."
+        elif etype == "merger":
+            summary = f"Likely involved in a merger{f' ({year})' if year else ''}."
+        else:
+            summary = f"Likely IPO / public offering signal{f' ({year})' if year else ''}."
+
+        if top_title or domain:
+            src = top_title.strip()[:90]
+            if domain:
+                summary += f" Source: {domain}{(' — ' + src) if src else ''}."
+            elif src:
+                summary += f" Source: {src}."
 
         yield {
-            "org_name": org, "detected_growth_event_type": etype,
-            "event_summary": summary[:300],
-            "event_date": dm.group(0) if dm and etype else None,
-            "confidence": conf, "sources": sources,
+            "org_name": org,
+            "detected_growth_event_type": etype,
+            "event_summary": summary[:320],
+            "event_date": year if year and etype else None,
+            "confidence": conf,
+            "sources": sources,
         }
 
 
@@ -789,8 +841,23 @@ def analyze():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
-def _names_from_request():
+def _growth_candidates_from_request():
+    """Return candidate org names for growth research.
+
+    Supports filtering by segment (query arg or form field):
+    - hm_essential (default): High + Medium touch + Essential
+    - hm: High + Medium touch only
+    - essential: Essential only
+    - all: no filtering
+
+    Note: touch tier is derived from plan name in CSV#1.
+    """
     csv1 = request.files.get("csv1")
+    segment = (request.args.get("segment") or request.form.get("segment") or "hm_essential").strip().lower()
+
+    names = []
+    meta = {"segment": segment, "total_available": 0, "filtered": False}
+
     if csv1:
         mrr_raw = read_csv_safe(csv1)
         wide = detect_wide_format(mrr_raw)
@@ -798,14 +865,71 @@ def _names_from_request():
             mrr = wide
         else:
             mrr, _ = map_cols(mrr_raw, MRR_MAP)
-        names = mrr["org_name"].dropna().unique().tolist() if "org_name" in mrr.columns else []
+
+        if "org_name" not in mrr.columns:
+            return [], {**meta, "total_available": 0}
+
+        # pick a plan column to segment on
+        plan_series = None
+        if "end_plan" in mrr.columns:
+            plan_series = mrr["end_plan"]
+        elif "start_plan" in mrr.columns:
+            plan_series = mrr["start_plan"]
+
+        if plan_series is not None:
+            mrr = mrr.copy()
+            mrr["_plan"] = plan_series.apply(norm_plan)
+        else:
+            mrr = mrr.copy()
+            mrr["_plan"] = None
+
+        meta["total_available"] = int(mrr["org_name"].dropna().nunique())
+
+        allowed = None
+        if segment in ("hm_essential", "high_medium_essential"):
+            allowed = (HIGH_TOUCH | MEDIUM_TOUCH | {"ESSENTIAL"})
+            meta["filtered"] = True
+        elif segment in ("hm", "high_medium"):
+            allowed = (HIGH_TOUCH | MEDIUM_TOUCH)
+            meta["filtered"] = True
+        elif segment in ("essential",):
+            allowed = {"ESSENTIAL"}
+            meta["filtered"] = True
+        elif segment in ("all", "everything"):
+            allowed = None
+        else:
+            # Unknown segment -> default behavior
+            allowed = (HIGH_TOUCH | MEDIUM_TOUCH | {"ESSENTIAL"})
+            meta["filtered"] = True
+
+        if allowed is not None:
+            cand = mrr[mrr["_plan"].isin(allowed)]
+        else:
+            cand = mrr
+
+        names = cand["org_name"].dropna().astype(str).tolist()
+        # Preserve order but de-dupe
+        seen = set()
+        uniq = []
+        for n in names:
+            nn = n.strip()
+            if not nn or nn.lower() in seen:
+                continue
+            seen.add(nn.lower())
+            uniq.append(nn)
+        names = uniq
+        meta["total_candidates"] = len(names)
+
     else:
         data = request.get_json(silent=True)
         names = data.get("org_names", []) if data else []
-    return names
+        meta["total_available"] = len(names)
+        meta["total_candidates"] = len(names)
+
+    return names, meta
 
 
-def _growth_worker(job_id, names, max_orgs=50):
+def _growth_worker(job_id, names, max_orgs=300):
     started = time.time()
     try:
         results = []
@@ -847,20 +971,28 @@ def _growth_worker(job_id, names, max_orgs=50):
 @app.route("/api/growth-start", methods=["POST"])
 def growth_start():
     try:
-        names = _names_from_request()
+        names, meta = _growth_candidates_from_request()
         if not names:
             return jsonify({"error": "No org names found"}), 400
 
-        max_orgs = int(request.args.get("max_orgs", 50))
-        max_orgs = max(1, min(max_orgs, 50))
+        # Default higher than 50, but keep a reasonable cap to avoid DDG rate-limit bans.
+        max_orgs = int(request.args.get("max_orgs", 300))
+        max_orgs = max(1, min(max_orgs, 500))
 
         job_id = str(uuid.uuid4())
         total = min(len(names), max_orgs)
+        truncated = len(names) > max_orgs
+
         with GROWTH_JOBS_LOCK:
             GROWTH_JOBS[job_id] = {
                 "status": "queued",
                 "completed": 0,
                 "total": total,
+                "total_available": meta.get("total_available"),
+                "total_candidates": len(names),
+                "segment": meta.get("segment"),
+                "filtered": meta.get("filtered"),
+                "truncated": truncated,
                 "signals": [],
                 "created_at": time.time(),
                 "updated_at": time.time(),
@@ -868,7 +1000,16 @@ def growth_start():
 
         t = threading.Thread(target=_growth_worker, args=(job_id, names, max_orgs), daemon=True)
         t.start()
-        return jsonify({"success": True, "job_id": job_id, "total": total})
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "total": total,
+            "total_available": meta.get("total_available"),
+            "total_candidates": len(names),
+            "segment": meta.get("segment"),
+            "filtered": meta.get("filtered"),
+            "truncated": truncated,
+        })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

@@ -272,9 +272,21 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div class="section-title">3. Business Growth Signals
           <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('growth_signals', growthData)">⬇ Export CSV</button>
         </div>
-        <div class="mb-3">
+        <div class="mb-3 d-flex flex-wrap align-items-center gap-2">
           <button class="btn btn-primary" id="btnGrowth" onclick="runGrowthSignals()">🔍 Run Live Research</button>
-          <span class="text-muted small ms-2">Searches the web for each org — may take a few minutes</span>
+
+          <label class="small text-muted ms-1">Scope</label>
+          <select id="growthScope" class="form-select form-select-sm" style="width:auto">
+            <option value="hm_essential" selected>High + Medium + Essential</option>
+            <option value="hm">High + Medium only</option>
+            <option value="essential">Essential only</option>
+            <option value="all">All orgs in CSV #1</option>
+          </select>
+
+          <label class="small text-muted ms-1">Max orgs</label>
+          <input id="growthMax" type="number" class="form-control form-control-sm" style="width:110px" min="10" max="500" value="300" />
+
+          <span class="text-muted small">Searches the web for each org — may take a few minutes</span>
         </div>
         <div class="growth-progress" id="growthProgress" style="display:none">
           <div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" id="growthBar" style="width:0%"></div></div>
@@ -786,13 +798,19 @@ async function runGrowthSignals() {
   fd.append('csv1', file1);
 
   try {
-    const startData = await fetchJsonWithRetry('/api/growth-start', { method: 'POST', body: fd }, 3);
+    const scope = $('growthScope') ? $('growthScope').value : 'hm_essential';
+    const maxOrgs = $('growthMax') ? Math.min(500, Math.max(10, parseInt($('growthMax').value || '300', 10))) : 300;
+
+    const startUrl = `/api/growth-start?max_orgs=${encodeURIComponent(maxOrgs)}&segment=${encodeURIComponent(scope)}`;
+    const startData = await fetchJsonWithRetry(startUrl, { method: 'POST', body: fd }, 3);
     if (startData.error) throw new Error(startData.error);
 
     const jobId = startData.job_id;
     const total = startData.total || 0;
+    const cand = startData.total_candidates || total;
+    const trunc = startData.truncated ? ' (truncated)' : '';
 
-    $('growthStatus').textContent = `Running live research for ${total} organizations...`;
+    $('growthStatus').textContent = `Running live research for ${total} orgs (scope: ${scope}, candidates: ${cand}${trunc})...`;
 
     // Poll status
     const pollEveryMs = 2000;
