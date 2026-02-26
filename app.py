@@ -411,7 +411,10 @@ def enrich_sandbox(sb, mrr, orgs):
 
 def nrr_analysis(mrr):
     mrr = prepare_mrr(mrr)
-    cohort = mrr[mrr["_sp"].isin(NRR_PLANS)].copy()
+    # NRR is calculated on an existing revenue base only:
+    # - exclude new MRR (start_mrr == 0)
+    # - exclude sandbox plans
+    cohort = mrr[(mrr["_sp"].isin(NRR_PLANS)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
     if cohort.empty:
         return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": []}
 
@@ -459,7 +462,12 @@ def nrr_analysis(mrr):
 def expansion_analysis(mrr):
     mrr = prepare_mrr(mrr)
     mrr["_delta"] = mrr["_em"] - mrr["_sm"]
-    exp = mrr[mrr["_delta"] > 0].sort_values("_delta", ascending=False)
+
+    # True expansion: starting MRR > 0 and grows
+    exp = mrr[(mrr["_sm"] > 0) & (mrr["_delta"] > 0)].sort_values("_delta", ascending=False)
+    # New MRR: starting MRR == 0 and ends > 0 (should NOT be counted as expansion)
+    new_mrr = mrr[(mrr["_sm"] == 0) & (mrr["_em"] > 0)].sort_values("_em", ascending=False)
+
     return {
         "total_expansion_mrr": money(_s(exp, "_delta")),
         "expander_count": len(exp),
@@ -468,6 +476,10 @@ def expansion_analysis(mrr):
         ).to_dict("records"),
         # For drill-down (click metric card)
         "all_expanders": accounts_table(exp.head(200)),
+
+        "new_mrr_total": money(_s(new_mrr, "_em")),
+        "new_mrr_count": int(len(new_mrr)),
+        "new_mrr_accounts": accounts_table(new_mrr.head(200)),
     }
 
 

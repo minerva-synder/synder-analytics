@@ -633,9 +633,12 @@ function renderWaterfall(canvasId, nrr) {
 }
 
 function renderExpansion(exp) {
-  setDetails('exp_all', 'All expansion accounts', exp.all_expanders || []);
+  setDetails('exp_all', 'Expansion accounts (start MRR > $0)', exp.all_expanders || []);
+  setDetails('new_mrr_all', 'New MRR accounts (start MRR = $0)', exp.new_mrr_accounts || []);
+
   $('expansionCards').innerHTML =
-    metricCard('Total Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts expanded', 'green', 'exp_all');
+    metricCard('Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts expanded', 'green', 'exp_all') +
+    metricCard('New MRR', fmt(exp.new_mrr_total), num(exp.new_mrr_count) + ' new accounts', 'blue', 'new_mrr_all');
 
   expansionData = exp.top_expanders;
   $('expansionTable').innerHTML = renderTable(exp.top_expanders, [
