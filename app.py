@@ -660,7 +660,7 @@ def at_risk_analysis(mrr, orgs):
 # Growth Signals (web research)
 # ---------------------------------------------------------------------------
 
-def _research_growth_iter(org_names, max_orgs=300):
+def _research_growth_iter(org_names, max_orgs=500):
     """Generator: yields one result dict per org."""
     try:
         from duckduckgo_search import DDGS
@@ -674,13 +674,24 @@ def _research_growth_iter(org_names, max_orgs=300):
             continue
 
         # Gentle pacing helps avoid being throttled/banned by the search provider.
-        time.sleep(0.25)
+        time.sleep(0.35)
 
         query = f'"{org}" (funding OR acquisition OR merger OR "series" OR investment OR IPO) 2024 OR 2025 OR 2026'
-        try:
-            sr = list(ddgs.text(query, max_results=5))
-        except Exception as e:
-            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {e}", "event_date": None, "confidence": "low", "sources": []}
+
+        sr = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                sr = list(ddgs.text(query, max_results=5))
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                # Backoff on errors (rate limit / temporary blocks)
+                time.sleep(1.5 * (attempt + 1) ** 2)
+
+        if last_err is not None and sr is None:
+            yield {"org_name": org, "detected_growth_event_type": None, "event_summary": f"Search error: {last_err}", "event_date": None, "confidence": "low", "sources": []}
             continue
 
         if not sr:
@@ -975,19 +986,24 @@ def growth_start():
         if not names:
             return jsonify({"error": "No org names found"}), 400
 
-        # Default higher than 50, but keep a reasonable cap to avoid DDG rate-limit bans.
-        max_orgs = int(request.args.get("max_orgs", 300))
+        # Default is the whole filtered cohort (up to a cap).
+        max_orgs_default = min(len(names), 500)
+        max_orgs = int(request.args.get("max_orgs", max_orgs_default))
         max_orgs = max(1, min(max_orgs, 500))
 
         job_id = str(uuid.uuid4())
         total = min(len(names), max_orgs)
         truncated = len(names) > max_orgs
 
+        # Very rough ETA: DDG calls + parsing. Real times vary.
+        eta_minutes = int(max(1, round((total * 2.0) / 60.0)))
+
         with GROWTH_JOBS_LOCK:
             GROWTH_JOBS[job_id] = {
                 "status": "queued",
                 "completed": 0,
                 "total": total,
+                "eta_minutes": eta_minutes,
                 "total_available": meta.get("total_available"),
                 "total_candidates": len(names),
                 "segment": meta.get("segment"),
@@ -1004,6 +1020,7 @@ def growth_start():
             "success": True,
             "job_id": job_id,
             "total": total,
+            "eta_minutes": eta_minutes,
             "total_available": meta.get("total_available"),
             "total_candidates": len(names),
             "segment": meta.get("segment"),

@@ -284,9 +284,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
           </select>
 
           <label class="small text-muted ms-1">Max orgs</label>
-          <input id="growthMax" type="number" class="form-control form-control-sm" style="width:110px" min="10" max="500" value="300" />
+          <input id="growthMax" type="number" class="form-control form-control-sm" style="width:110px" min="10" max="500" value="500" />
 
-          <span class="text-muted small">Searches the web for each org — may take a few minutes</span>
+          <span class="text-muted small">Runs in the background and may take a while for large cohorts</span>
         </div>
         <div class="growth-progress" id="growthProgress" style="display:none">
           <div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" id="growthBar" style="width:0%"></div></div>
@@ -810,7 +810,8 @@ async function runGrowthSignals() {
     const cand = startData.total_candidates || total;
     const trunc = startData.truncated ? ' (truncated)' : '';
 
-    $('growthStatus').textContent = `Running live research for ${total} orgs (scope: ${scope}, candidates: ${cand}${trunc})...`;
+    const eta = startData.eta_minutes ? ` ~${startData.eta_minutes} min` : '';
+    $('growthStatus').textContent = `Running live research for ${total} orgs (scope: ${scope}, candidates: ${cand}${trunc})...${eta}`;
 
     // Poll status
     const pollEveryMs = 2000;
