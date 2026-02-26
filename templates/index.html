@@ -282,12 +282,35 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
   </div>
 </div>
 
+<!-- DETAILS MODAL (click metric number to drill down) -->
+<div class="modal fade" id="detailsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="detailsTitle">Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex gap-2 align-items-center mb-2">
+          <input class="form-control form-control-sm" id="detailsSearch" placeholder="Filter by org name or ID..." oninput="filterDetails()" />
+          <span class="text-muted small" id="detailsCount"></span>
+        </div>
+        <div class="table-wrapper" id="detailsTable"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 // ---- State ----
 let file1 = null, file2 = null;
 let analysisResult = null;
 let nrrBreakdownData = [], expansionData = [], churnData = [], atRiskData = [], growthData = [];
+
+// Drill-down store for clickable metric cards
+let detailsStore = {};
+let detailsActiveKey = null;
 
 // ---- Upload handling ----
 function handleFile(num, input) {
@@ -353,14 +376,92 @@ function fmt(v) { return v == null ? '—' : '$' + Number(v).toLocaleString('en-
 function pct(v) { return v == null ? '—' : v.toFixed(2) + '%'; }
 function num(v) { return v == null ? '—' : Number(v).toLocaleString(); }
 
-function metricCard(label, value, sub, color) {
+function setDetails(key, title, rows) {
+  detailsStore[key] = { title: title || 'Details', rows: rows || [] };
+}
+
+function renderDetailsTable(rows) {
+  if (!rows || !rows.length) return '<p class="text-muted small p-3">No data</p>';
+
+  const hasLast = rows.some(r => r.last_mrr_before_churn != null);
+
+  const cols = [
+    {key:'org_id', label:'Org ID'},
+    {key:'org_name', label:'Organization'},
+    {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+    {key:'start_plan', label:'Start Plan'},
+    {key:'end_plan', label:'End Plan'},
+    ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
+    {key:'end_mrr', label:'End MRR', fmt: fmt},
+    {key:'delta', label:'Delta', fmt: fmt},
+  ];
+
+  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
+  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  rows.forEach(r => {
+    html += '<tr>';
+    cols.forEach(c => {
+      const val = r[c.key];
+      const display = c.fmt ? c.fmt(val) : (val ?? '—');
+      html += `<td>${display}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  return html;
+}
+
+function showDetails(key) {
+  const d = detailsStore[key];
+  if (!d) return;
+  detailsActiveKey = key;
+  $('detailsTitle').textContent = d.title;
+  $('detailsSearch').value = '';
+  $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
+  $('detailsTable').innerHTML = renderDetailsTable(d.rows);
+
+  const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
+  modal.show();
+}
+
+function filterDetails() {
+  if (!detailsActiveKey) return;
+  const d = detailsStore[detailsActiveKey];
+  if (!d) return;
+  const q = ($('detailsSearch').value || '').trim().toLowerCase();
+  if (!q) {
+    $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
+    $('detailsTable').innerHTML = renderDetailsTable(d.rows);
+    return;
+  }
+  const filtered = d.rows.filter(r =>
+    String(r.org_id || '').toLowerCase().includes(q) ||
+    String(r.org_name || '').toLowerCase().includes(q)
+  );
+  $('detailsCount').textContent = `${filtered.length.toLocaleString()} / ${d.rows.length.toLocaleString()} orgs`;
+  $('detailsTable').innerHTML = renderDetailsTable(filtered);
+}
+
+function metricCard(label, value, sub, color, detailKey) {
+  const clickable = detailKey && detailsStore[detailKey] && (detailsStore[detailKey].rows || []).length;
+  const valHtml = clickable
+    ? `<a href="#" onclick="showDetails('${detailKey}');return false;" style="text-decoration:none">${value}</a>`
+    : value;
+
   return `<div class="col-sm-6 col-md-3"><div class="metric-card ${color||''}">
-    <div class="label">${label}</div><div class="value">${value}</div>
+    <div class="label">${label}</div><div class="value">${valHtml}</div>
     ${sub ? `<div class="sub">${sub}</div>` : ''}
   </div></div>`;
 }
 
 function renderResults(data) {
+  // Reset drill-down store per run
+  detailsStore = {};
+  detailsActiveKey = null;
+
   // Warnings
   if (data.warnings && data.warnings.length) {
     $('warningsBox').style.display = 'block';
@@ -386,34 +487,46 @@ function renderResults(data) {
 function renderSandbox(sb) {
   // A
   const a = sb.A_cohort;
+  setDetails('sb_start', 'Sandbox cohort (start)', a.start_accounts || []);
+  setDetails('sb_current', 'Sandbox cohort (current)', a.current_accounts || []);
+
   $('sandboxCohortCards').innerHTML =
-    metricCard('Accounts (Start)', num(a.start_count), '', 'blue') +
-    metricCard('MRR (Start)', fmt(a.start_mrr), '', 'blue') +
-    metricCard('Accounts (Now)', num(a.current_count), '', 'blue') +
-    metricCard('MRR (Now)', fmt(a.current_mrr), '', 'blue');
+    metricCard('Accounts (Start)', num(a.start_count), '', 'blue', 'sb_start') +
+    metricCard('MRR (Start)', fmt(a.start_mrr), 'click to view orgs', 'blue', 'sb_start') +
+    metricCard('Accounts (Now)', num(a.current_count), '', 'blue', 'sb_current') +
+    metricCard('MRR (Now)', fmt(a.current_mrr), 'click to view orgs', 'blue', 'sb_current');
 
   // B
   const b = sb.B_churn_downgrade;
+  setDetails('sb_churned', 'Churned sandboxes', b.churned_accounts || []);
+  setDetails('sb_downgraded', 'Downgraded sandboxes', b.downgraded_accounts || []);
+
   $('sandboxChurnCards').innerHTML =
-    metricCard('Churned', num(b.churned_count), 'MRR lost: ' + fmt(b.churned_mrr_lost), 'red') +
-    metricCard('Downgraded', num(b.downgraded_count), 'MRR delta: ' + fmt(b.downgraded_mrr_delta), 'amber');
+    metricCard('Churned', num(b.churned_count), 'MRR lost: ' + fmt(b.churned_mrr_lost), 'red', 'sb_churned') +
+    metricCard('Downgraded', num(b.downgraded_count), 'MRR delta: ' + fmt(b.downgraded_mrr_delta), 'amber', 'sb_downgraded');
 
   // C
   const c = sb.C_moved_to_pro;
+  setDetails('sb_moved_pro', 'Sandbox → Pro/Large', c.accounts || []);
   $('sandboxProCards').innerHTML =
-    metricCard('Moved to Pro', num(c.count), 'MRR now: ' + fmt(c.mrr_now), 'green');
+    metricCard('Moved to Pro', num(c.count), 'MRR now: ' + fmt(c.mrr_now), 'green', 'sb_moved_pro');
 
   // D
   const d = sb.D_new_mrr;
+  setDetails('sb_new', 'New sandbox accounts (start MRR = $0)', d.accounts || []);
   $('sandboxNewCards').innerHTML =
-    metricCard('New Sandbox Accounts', num(d.count), 'MRR: ' + fmt(d.mrr_now), 'green');
+    metricCard('New Sandbox Accounts', num(d.count), 'MRR: ' + fmt(d.mrr_now), 'green', 'sb_new');
 
   // E
   const e = sb.E_upgrades_expansion;
+  setDetails('sb_upgrades', 'Sandbox upgrades (to high-touch)', e.upgrade_accounts || []);
+  setDetails('sb_expansion', 'Sandbox expansion (same plan)', e.expansion_accounts || []);
+  setDetails('sb_total_delta', 'Sandbox upgrades + expansion', [...(e.upgrade_accounts||[]), ...(e.expansion_accounts||[])]);
+
   $('sandboxUpgradeCards').innerHTML =
-    metricCard('Upgrades', num(e.upgrade_count), 'Delta: ' + fmt(e.upgrade_mrr_delta), 'green') +
-    metricCard('Expansion (same plan)', num(e.expansion_count), 'Delta: ' + fmt(e.expansion_mrr_delta), 'green') +
-    metricCard('Total Delta', fmt(e.total_delta), '', 'green');
+    metricCard('Upgrades', num(e.upgrade_count), 'Delta: ' + fmt(e.upgrade_mrr_delta), 'green', 'sb_upgrades') +
+    metricCard('Expansion (same plan)', num(e.expansion_count), 'Delta: ' + fmt(e.expansion_mrr_delta), 'green', 'sb_expansion') +
+    metricCard('Total Delta', fmt(e.total_delta), 'click to view orgs', 'green', 'sb_total_delta');
 
   // F
   if (sb.F_not_syncing) {
@@ -441,11 +554,17 @@ function renderSandbox(sb) {
 }
 
 function renderNRR(nrr) {
+  setDetails('nrr_cohort', 'NRR cohort (High + Medium touch at start)', nrr.cohort_accounts || []);
+  setDetails('nrr_expansion', 'NRR — expansion accounts', nrr.expansion_accounts || []);
+  setDetails('nrr_churned', 'NRR — churned accounts', nrr.churned_accounts || []);
+  setDetails('nrr_contraction', 'NRR — contraction accounts', nrr.contraction_accounts || []);
+  setDetails('nrr_churn_plus_contr', 'NRR — churn + contraction', [...(nrr.churned_accounts||[]), ...(nrr.contraction_accounts||[])]);
+
   $('nrrCards').innerHTML =
-    metricCard('NRR', pct(nrr.nrr_pct), '', nrr.nrr_pct >= 100 ? 'green' : 'red') +
-    metricCard('Starting MRR', fmt(nrr.starting_mrr), '', 'blue') +
-    metricCard('Expansion', fmt(nrr.expansion_mrr), '', 'green') +
-    metricCard('Churn + Contraction', fmt(nrr.churn_mrr + nrr.contraction_mrr), 'Churn: ' + fmt(nrr.churn_mrr) + ' | Contract: ' + fmt(nrr.contraction_mrr), 'red');
+    metricCard('NRR', pct(nrr.nrr_pct), 'click to view cohort', nrr.nrr_pct >= 100 ? 'green' : 'red', 'nrr_cohort') +
+    metricCard('Starting MRR', fmt(nrr.starting_mrr), 'click to view cohort', 'blue', 'nrr_cohort') +
+    metricCard('Expansion', fmt(nrr.expansion_mrr), 'click to view orgs', 'green', 'nrr_expansion') +
+    metricCard('Churn + Contraction', fmt(nrr.churn_mrr + nrr.contraction_mrr), 'Churn: ' + fmt(nrr.churn_mrr) + ' | Contract: ' + fmt(nrr.contraction_mrr), 'red', 'nrr_churn_plus_contr');
 
   // Waterfall chart
   renderWaterfall('nrrWaterfall', nrr);
@@ -512,8 +631,9 @@ function renderWaterfall(canvasId, nrr) {
 }
 
 function renderExpansion(exp) {
+  setDetails('exp_all', 'All expansion accounts', exp.all_expanders || []);
   $('expansionCards').innerHTML =
-    metricCard('Total Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts expanded', 'green');
+    metricCard('Total Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts expanded', 'green', 'exp_all');
 
   expansionData = exp.top_expanders;
   $('expansionTable').innerHTML = renderTable(exp.top_expanders, [
@@ -527,10 +647,30 @@ function renderExpansion(exp) {
 function renderChurn(ch) {
   if (ch.error) { $('churnBuckets').innerHTML = `<p class="text-danger">${ch.error}</p>`; return; }
 
-  $('churnBuckets').innerHTML = ch.buckets.map(b =>
-    metricCard(b.bucket, num(b.count), 'MRR at risk: ' + fmt(b.mrr_at_risk),
-      b.bucket === '0-7 days' ? 'red' : b.bucket === '8-14 days' ? 'amber' : '')
-  ).join('');
+  // Drill-down per bucket
+  const acctByBucket = {};
+  (ch.accounts || []).forEach(a => {
+    const k = a.bucket || 'unknown';
+    if (!acctByBucket[k]) acctByBucket[k] = [];
+    // Normalize to drill-down format
+    acctByBucket[k].push({
+      org_id: a.org_id,
+      org_name: a.org_name,
+      synder_url: a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : '',
+      start_plan: a.plan_display || '',
+      end_plan: a.plan_display || '',
+      start_mrr: a.mrr,
+      end_mrr: a.mrr,
+      delta: 0,
+    });
+  });
+
+  $('churnBuckets').innerHTML = ch.buckets.map(b => {
+    const key = 'churn_' + b.bucket.replace(/\W+/g,'_');
+    setDetails(key, `Churn prediction — ${b.bucket}`, acctByBucket[b.bucket] || []);
+    return metricCard(b.bucket, num(b.count), 'MRR at risk: ' + fmt(b.mrr_at_risk),
+      b.bucket === '0-7 days' ? 'red' : b.bucket === '8-14 days' ? 'amber' : '', key);
+  }).join('');
 
   churnData = ch.accounts;
   $('churnTable').innerHTML = renderTable(ch.accounts, [
@@ -546,8 +686,19 @@ function renderChurn(ch) {
 function renderAtRisk(ar) {
   if (ar.error) { $('atRiskSummary').innerHTML = `<p class="text-danger">${ar.error}</p>`; return; }
 
+  setDetails('at_risk_all', 'At-risk accounts (high/medium touch)', (ar.accounts || []).map(a => ({
+    org_id: a.org_id,
+    org_name: a.org_name,
+    synder_url: a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : '',
+    start_plan: a.plan_name || '',
+    end_plan: a.plan_name || '',
+    start_mrr: a.mrr,
+    end_mrr: a.mrr,
+    delta: 0,
+  })));
+
   $('atRiskSummary').innerHTML =
-    `<div class="row g-3">${metricCard('Total At Risk', num(ar.total_at_risk), '', 'amber')}</div>`;
+    `<div class="row g-3">${metricCard('Total At Risk', num(ar.total_at_risk), 'click to view orgs', 'amber', 'at_risk_all')}</div>`;
 
   if (ar.warnings && ar.warnings.length) {
     $('atRiskSummary').innerHTML += `<div class="warnings-box mt-2"><ul>${ar.warnings.map(w=>`<li class="small">${w}</li>`).join('')}</ul></div>`;

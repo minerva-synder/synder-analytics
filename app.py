@@ -33,6 +33,37 @@ ADDON_PLANS = {"SALES_VOLUME", "ADDITIONAL_USER", "SMART_RULE_UP_TO_10", "SMART_
                "REV_REC_UP_TO_10K", "REV_REC_MED", "REV_REC_SMALL", "INVOICING", "INVOICING_UP_TO_50",
                "INVOICING_UP_TO_1000", "GROWTH", "PROFESSIONAL"}
 
+SYNDER_ORG_URL_TMPL = "https://go.synder.com/organizations/view/{}"
+
+
+def synder_org_url(org_id):
+    oid = "" if org_id is None else str(org_id).strip()
+    if oid.startswith("http://") or oid.startswith("https://"):
+        return oid
+    if oid == "":
+        return ""
+    return SYNDER_ORG_URL_TMPL.format(oid)
+
+
+def accounts_table(df, start_col="_sm", end_col="_em"):
+    """Build a small preview list of orgs for drill-down modal."""
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        oid = r.get("org_id", "")
+        out.append({
+            "org_id": str(oid) if oid is not None else "",
+            "synder_url": synder_org_url(oid),
+            "org_name": r.get("org_name", ""),
+            "start_plan": r.get("start_plan", None),
+            "end_plan": r.get("end_plan", None),
+            "start_mrr": money(r.get(start_col, 0)),
+            "end_mrr": money(r.get(end_col, 0)),
+            "delta": money(money(r.get(end_col, 0)) - money(r.get(start_col, 0))),
+        })
+    return out
+
 
 def norm_plan(raw):
     if pd.isna(raw) or str(raw).strip() in ("", "-", "nan", "None"):
@@ -268,6 +299,8 @@ def sandbox_analysis(mrr):
     A = {
         "start_count": len(sb_start), "start_mrr": money(_s(sb_start, "_sm")),
         "current_count": len(sb_end), "current_mrr": money(_s(sb_end, "_em")),
+        "start_accounts": accounts_table(sb_start),
+        "current_accounts": accounts_table(sb_end),
     }
 
     if sb_start.empty:
@@ -283,19 +316,26 @@ def sandbox_analysis(mrr):
 
     churned = sb_start[(sb_start["_em"] == 0) | sb_start["_ep"].isna()]
     downgraded = sb_start[sb_start["_ep"].isin({"BASIC", "ESSENTIAL", "MEDIUM", "SCALE", "STARTER"})]
+    churned_accounts = accounts_table(churned)
+    # For churned sandboxes, 'start_mrr' is the last non-zero MRR we have in the period (proxy for pre-churn MRR)
+    for a in churned_accounts:
+        a["last_mrr_before_churn"] = a.get("start_mrr", 0)
+
     B = {
         "churned_count": len(churned), "churned_mrr_lost": money(_s(churned, "_sm")),
+        "churned_accounts": churned_accounts,
         "downgraded_count": len(downgraded),
         "downgraded_mrr_before": money(_s(downgraded, "_sm")),
         "downgraded_mrr_after": money(_s(downgraded, "_em")),
         "downgraded_mrr_delta": money(_s(downgraded, "_em") - _s(downgraded, "_sm")),
+        "downgraded_accounts": accounts_table(downgraded),
     }
 
     moved_pro = sb_start[sb_start["_ep"].isin({"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"})]
-    C = {"count": len(moved_pro), "mrr_now": money(_s(moved_pro, "_em"))}
+    C = {"count": len(moved_pro), "mrr_now": money(_s(moved_pro, "_em")), "accounts": accounts_table(moved_pro)}
 
     new_sb = mrr[(mrr["_ep"].apply(is_sandbox)) & (mrr["_sm"] == 0)]
-    D = {"count": len(new_sb), "mrr_now": money(_s(new_sb, "_em"))}
+    D = {"count": len(new_sb), "mrr_now": money(_s(new_sb, "_em")), "accounts": accounts_table(new_sb)}
 
     upgrades = sb_start[sb_start["_ep"].isin(HIGH_TOUCH)]
     expansion = sb_start[(sb_start["_ep"].apply(is_sandbox)) & (sb_start["_em"] > sb_start["_sm"])]
@@ -303,7 +343,9 @@ def sandbox_analysis(mrr):
     ed = _s(expansion, "_em") - _s(expansion, "_sm")
     E = {
         "upgrade_count": len(upgrades), "upgrade_mrr_delta": money(ud),
+        "upgrade_accounts": accounts_table(upgrades),
         "expansion_count": len(expansion), "expansion_mrr_delta": money(ed),
+        "expansion_accounts": accounts_table(expansion),
         "total_delta": money(ud + ed),
     }
 
@@ -374,11 +416,19 @@ def nrr_analysis(mrr):
             "contraction": money(pa.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()),
         })
 
+    churned_accts = accounts_table(cohort[cohort["_churned"]])
+    exp_accts = accounts_table(active[active["_em"] > active["_sm"]])
+    contr_accts = accounts_table(active[active["_em"] < active["_sm"]])
+
     return {
         "nrr_pct": round(safe_div(retained, starting) * 100, 2) if safe_div(retained, starting) else None,
         "starting_mrr": money(starting), "ending_mrr": money(retained),
         "churn_mrr": money(churn), "contraction_mrr": money(contr),
         "expansion_mrr": money(exp), "plan_breakdown": breakdown,
+        "cohort_accounts": accounts_table(cohort),
+        "churned_accounts": churned_accts,
+        "expansion_accounts": exp_accts,
+        "contraction_accounts": contr_accts,
     }
 
 
@@ -392,6 +442,8 @@ def expansion_analysis(mrr):
         "top_expanders": exp.head(20)[["org_name", "start_mrr", "end_mrr", "_delta"]].rename(
             columns={"start_mrr": "starting_mrr", "end_mrr": "current_mrr", "_delta": "delta"}
         ).to_dict("records"),
+        # For drill-down (click metric card)
+        "all_expanders": accounts_table(exp.head(200)),
     }
 
 
