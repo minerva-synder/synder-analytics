@@ -227,6 +227,10 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <h6 class="text-muted mt-3 mb-2">E. Sandbox Upgrades & Price Expansion</h6>
         <div class="row g-3 mb-3" id="sandboxUpgradeCards"></div>
 
+        <!-- Cohort Retention Heatmap -->
+        <div class="section-title mt-4">Monthly Retention Cohorts</div>
+        <div id="cohortHeatmap" class="mb-4"><p class="text-muted small">Not available (requires wide-format CSV with date columns)</p></div>
+
         <!-- F: Not Syncing -->
         <h6 class="text-muted mt-3 mb-2">F. Sandbox Not Syncing At All</h6>
         <div id="sandboxNotSyncing" class="mb-3"></div>
@@ -305,6 +309,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title" id="detailsTitle">Details</h5>
+        <button class="btn btn-sm btn-outline-secondary me-2" onclick="exportDetails()">⬇ Export CSV</button>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
@@ -312,6 +317,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
           <input class="form-control form-control-sm" id="detailsSearch" placeholder="Filter by org name or ID..." oninput="filterDetails()" />
           <span class="text-muted small" id="detailsCount"></span>
         </div>
+        <div id="detailsTagCloud" class="mb-2"></div>
         <div class="table-wrapper" id="detailsTable"></div>
       </div>
     </div>
@@ -399,8 +405,8 @@ function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[ch]));
 }
 
-function setDetails(key, title, rows) {
-  detailsStore[key] = { title: title || 'Details', rows: rows || [] };
+function setDetails(key, title, rows, reasonSummary) {
+  detailsStore[key] = { title: title || 'Details', rows: rows || [], reasonSummary: reasonSummary || null };
 }
 
 function renderDetailsTable(rows) {
@@ -408,6 +414,7 @@ function renderDetailsTable(rows) {
 
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
   const hasLastDate = rows.some(r => r.last_mrr_date != null);
+  const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
 
   const cols = [
     {key:'org_id', label:'Org ID'},
@@ -419,6 +426,7 @@ function renderDetailsTable(rows) {
     ...(hasLastDate ? [{key:'last_mrr_date', label:'Last MRR date'}] : []),
     {key:'end_mrr', label:'End MRR', fmt: fmt},
     {key:'delta', label:'Delta', fmt: fmt},
+    ...(hasCancelReason ? [{key:'cancel_reason', label:'Cancel Reason'}] : []),
   ];
 
   let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
@@ -439,6 +447,20 @@ function renderDetailsTable(rows) {
   return html;
 }
 
+function renderTagCloud(reasonSummary) {
+  if (!reasonSummary || !Object.keys(reasonSummary).length) return '';
+  const sorted = Object.entries(reasonSummary).sort((a, b) => b[1] - a[1]);
+  const maxCount = sorted[0][1] || 1;
+  let html = '<div class="mb-2"><strong class="small text-muted">Why They Left:</strong><br>';
+  sorted.forEach(([reason, count]) => {
+    const scale = 0.75 + (count / maxCount) * 0.6;
+    const opacity = 0.5 + (count / maxCount) * 0.5;
+    html += `<span class="badge bg-danger me-1 mb-1" style="font-size:${scale.toFixed(2)}rem;opacity:${opacity.toFixed(2)}">${esc(reason)} (${count})</span>`;
+  });
+  html += '</div>';
+  return html;
+}
+
 function showDetails(key) {
   const d = detailsStore[key];
   if (!d) return;
@@ -446,28 +468,44 @@ function showDetails(key) {
   $('detailsTitle').textContent = d.title;
   $('detailsSearch').value = '';
   $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
+  $('detailsTagCloud').innerHTML = renderTagCloud(d.reasonSummary);
   $('detailsTable').innerHTML = renderDetailsTable(d.rows);
 
   const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
   modal.show();
 }
 
+function getFilteredDetails() {
+  if (!detailsActiveKey) return [];
+  const d = detailsStore[detailsActiveKey];
+  if (!d) return [];
+  const q = ($('detailsSearch').value || '').trim().toLowerCase();
+  if (!q) return d.rows;
+  return d.rows.filter(r =>
+    String(r.org_id || '').toLowerCase().includes(q) ||
+    String(r.org_name || '').toLowerCase().includes(q)
+  );
+}
+
 function filterDetails() {
   if (!detailsActiveKey) return;
   const d = detailsStore[detailsActiveKey];
   if (!d) return;
-  const q = ($('detailsSearch').value || '').trim().toLowerCase();
+  const filtered = getFilteredDetails();
+  const q = ($('detailsSearch').value || '').trim();
   if (!q) {
     $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
-    $('detailsTable').innerHTML = renderDetailsTable(d.rows);
-    return;
+  } else {
+    $('detailsCount').textContent = `${filtered.length.toLocaleString()} / ${d.rows.length.toLocaleString()} orgs`;
   }
-  const filtered = d.rows.filter(r =>
-    String(r.org_id || '').toLowerCase().includes(q) ||
-    String(r.org_name || '').toLowerCase().includes(q)
-  );
-  $('detailsCount').textContent = `${filtered.length.toLocaleString()} / ${d.rows.length.toLocaleString()} orgs`;
   $('detailsTable').innerHTML = renderDetailsTable(filtered);
+}
+
+function exportDetails() {
+  const rows = getFilteredDetails();
+  if (!rows || !rows.length) { alert('No data to export'); return; }
+  const key = detailsActiveKey || 'details';
+  exportCSV(key, rows);
 }
 
 function metricCard(label, value, sub, color, detailKey) {
@@ -503,6 +541,7 @@ function renderResults(data) {
   renderSandbox(d1.sandbox_cohort);
   renderNRR(d1.nrr);
   renderExpansion(d1.expansion);
+  renderCohortHeatmap(d1.cohort_heatmap || null);
 
   // ---- Dashboard 2 ----
   if (d2.churn_prediction) renderChurn(d2.churn_prediction);
@@ -523,7 +562,7 @@ function renderSandbox(sb) {
 
   // B
   const b = sb.B_churn_downgrade;
-  setDetails('sb_churned', 'Churned sandboxes', b.churned_accounts || []);
+  setDetails('sb_churned', 'Churned sandboxes', b.churned_accounts || [], b.cancel_reason_summary || null);
   setDetails('sb_downgraded', 'Downgraded sandboxes', b.downgraded_accounts || []);
 
   $('sandboxChurnCards').innerHTML =
@@ -581,9 +620,9 @@ function renderSandbox(sb) {
 function renderNRR(nrr) {
   setDetails('nrr_cohort', 'NRR cohort (High + Medium touch at start)', nrr.cohort_accounts || []);
   setDetails('nrr_expansion', 'NRR — expansion accounts', nrr.expansion_accounts || []);
-  setDetails('nrr_churned', 'NRR — churned accounts', nrr.churned_accounts || []);
+  setDetails('nrr_churned', 'NRR — churned accounts', nrr.churned_accounts || [], nrr.cancel_reason_summary || null);
   setDetails('nrr_contraction', 'NRR — contraction accounts', nrr.contraction_accounts || []);
-  setDetails('nrr_churn_plus_contr', 'NRR — churn + contraction', [...(nrr.churned_accounts||[]), ...(nrr.contraction_accounts||[])]);
+  setDetails('nrr_churn_plus_contr', 'NRR — churn + contraction', [...(nrr.churned_accounts||[]), ...(nrr.contraction_accounts||[])], nrr.cancel_reason_summary || null);
 
   $('nrrCards').innerHTML =
     metricCard('NRR', pct(nrr.nrr_pct), 'click to view cohort', nrr.nrr_pct >= 100 ? 'green' : 'red', 'nrr_cohort') +
@@ -1019,6 +1058,56 @@ function exportCSV(name, rows) {
   a.href = URL.createObjectURL(blob);
   a.download = `synder_${name}_${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
+}
+
+// ---- Cohort Heatmap ----
+function heatmapColor(pct) {
+  // 100% → green #10B981, 50% → yellow #F59E0B, 0% → red #EF4444
+  if (pct == null) return '#E2E8F0';
+  const p = Math.max(0, Math.min(100, pct)) / 100;
+  let r, g, b;
+  if (p >= 0.5) {
+    const t = (p - 0.5) * 2;
+    r = Math.round(245 + (16 - 245) * t);
+    g = Math.round(158 + (185 - 158) * t);
+    b = Math.round(11 + (129 - 11) * t);
+  } else {
+    const t = p * 2;
+    r = Math.round(239 + (245 - 239) * t);
+    g = Math.round(68 + (158 - 68) * t);
+    b = Math.round(68 + (11 - 68) * t);
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+function renderCohortHeatmap(heatmap) {
+  const el = $('cohortHeatmap');
+  if (!el) return;
+  if (!heatmap || !heatmap.cohorts || !heatmap.cohorts.length) {
+    el.innerHTML = '<p class="text-muted small">Not available (requires wide-format CSV with date columns)</p>';
+    return;
+  }
+  const maxMonths = heatmap.max_months || 0;
+  let html = '<div class="table-wrapper" style="overflow-x:auto"><table class="table table-sm data-table mb-0" style="min-width:600px"><thead><tr>';
+  html += '<th>Cohort Month</th><th>Cohort Size</th>';
+  for (let i = 0; i < maxMonths; i++) html += `<th>Month ${i}</th>`;
+  html += '</tr></thead><tbody>';
+  heatmap.cohorts.forEach(c => {
+    html += `<tr><td><strong>${esc(c.month)}</strong></td><td>${c.size}</td>`;
+    for (let i = 0; i < maxMonths; i++) {
+      const pct = c.retentions[i];
+      if (pct == null) {
+        html += '<td style="background:#F8FAFC;color:#94A3B8">—</td>';
+      } else {
+        const bg = heatmapColor(pct);
+        const textColor = pct > 45 ? '#1E293B' : '#fff';
+        html += `<td style="background:${bg};color:${textColor};font-weight:600;text-align:center">${pct}%</td>`;
+      }
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
 }
 
 // ---- Loading ----

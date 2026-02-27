@@ -4,6 +4,7 @@ Flask app: two CSVs → two dashboards.
 """
 
 import os, json, re, math, traceback, csv, threading, time, uuid
+from collections import Counter
 from urllib.parse import urlparse, parse_qs, urlparse as _urlparse
 import urllib.request
 import urllib.parse
@@ -243,6 +244,64 @@ def detect_wide_format(df):
     return result
 
 
+def cohort_heatmap(mrr_raw):
+    """Compute monthly cohort retention heatmap from wide-format DataFrame.
+    Returns dict with cohorts list, or None if not enough data."""
+    cols = list(mrr_raw.columns)
+    amount_cols = [c for c in cols if re.match(r'amount\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+    if len(amount_cols) < 2:
+        return None
+
+    def extract_date(col_name):
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', col_name)
+        return m.group(1) if m else None
+
+    amount_dates = sorted([(extract_date(c), c) for c in amount_cols], key=lambda x: x[0])
+    n_dates = len(amount_dates)
+    date_months = [d[:7] for d, _ in amount_dates]  # YYYY-MM
+
+    # Build active matrix per org
+    org_active = []  # list of (first_active_idx, [bool, ...])
+    for _, row in mrr_raw.iterrows():
+        active = []
+        first_active = None
+        for i, (ds, col) in enumerate(amount_dates):
+            try:
+                v = float(row.get(col, 0) or 0)
+            except Exception:
+                v = 0.0
+            is_active = v > 0
+            active.append(is_active)
+            if is_active and first_active is None:
+                first_active = i
+        if first_active is not None:
+            org_active.append((first_active, active))
+
+    if not org_active:
+        return None
+
+    # Group by first active month index
+    cohort_map = {}
+    for first_idx, active in org_active:
+        cohort_map.setdefault(first_idx, []).append(active)
+
+    cohorts = []
+    for first_idx in sorted(cohort_map.keys()):
+        members = cohort_map[first_idx]
+        size = len(members)
+        month_label = date_months[first_idx]
+        retentions = []
+        for offset in range(n_dates - first_idx):
+            month_idx = first_idx + offset
+            active_count = sum(1 for m in members if m[month_idx])
+            pct = round(active_count / size * 100, 1)
+            retentions.append(pct)
+        cohorts.append({"month": month_label, "size": size, "retentions": retentions})
+
+    max_months = max(len(c["retentions"]) for c in cohorts) if cohorts else 0
+    return {"cohorts": cohorts, "max_months": max_months}
+
+
 def _s(df, col):
     """Safe sum on a potentially empty df."""
     if df.empty or col not in df.columns:
@@ -353,9 +412,21 @@ def sandbox_analysis(mrr):
         if a.get("last_active_date"):
             a["last_mrr_date"] = a.get("last_active_date")
 
+    # Attach cancel reasons if available
+    cancel_col = col_find(mrr, ["subscription__cancel_reason_level_1", "cancel_reason", "cancellation_reason", "cancel_reason_level_1"])
+    cancel_reason_summary = {}
+    if cancel_col and cancel_col in churned.columns:
+        cancel_vals = churned[cancel_col].fillna("").astype(str).str.strip().tolist()
+        for i, acc in enumerate(churned_accounts):
+            if i < len(cancel_vals):
+                acc["cancel_reason"] = cancel_vals[i]
+        reasons = [v for v in cancel_vals if v]
+        cancel_reason_summary = dict(Counter(reasons).most_common(10))
+
     B = {
         "churned_count": len(churned), "churned_mrr_lost": money(_s(churned, "_sm")),
         "churned_accounts": churned_accounts,
+        "cancel_reason_summary": cancel_reason_summary,
         "downgraded_count": len(downgraded),
         "downgraded_mrr_before": money(_s(downgraded, "_sm")),
         "downgraded_mrr_after": money(_s(downgraded, "_em")),
@@ -451,9 +522,21 @@ def nrr_analysis(mrr):
             "contraction": money(pa.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()),
         })
 
-    churned_accts = accounts_table(cohort[cohort["_churned"]])
+    churned_subset = cohort[cohort["_churned"]]
+    churned_accts = accounts_table(churned_subset)
     exp_accts = accounts_table(active[active["_em"] > active["_sm"]])
     contr_accts = accounts_table(active[active["_em"] < active["_sm"]])
+
+    # Attach cancel reasons if available
+    nrr_cancel_col = col_find(mrr, ["subscription__cancel_reason_level_1", "cancel_reason", "cancellation_reason", "cancel_reason_level_1"])
+    nrr_cancel_reason_summary = {}
+    if nrr_cancel_col and nrr_cancel_col in churned_subset.columns:
+        nrr_cancel_vals = churned_subset[nrr_cancel_col].fillna("").astype(str).str.strip().tolist()
+        for i, acc in enumerate(churned_accts):
+            if i < len(nrr_cancel_vals):
+                acc["cancel_reason"] = nrr_cancel_vals[i]
+        nrr_reasons = [v for v in nrr_cancel_vals if v]
+        nrr_cancel_reason_summary = dict(Counter(nrr_reasons).most_common(10))
 
     return {
         "nrr_pct": round(safe_div(retained, starting) * 100, 2) if safe_div(retained, starting) else None,
@@ -462,6 +545,7 @@ def nrr_analysis(mrr):
         "expansion_mrr": money(exp), "plan_breakdown": breakdown,
         "cohort_accounts": accounts_table(cohort),
         "churned_accounts": churned_accts,
+        "cancel_reason_summary": nrr_cancel_reason_summary,
         "expansion_accounts": exp_accts,
         "contraction_accounts": contr_accts,
     }
@@ -948,10 +1032,12 @@ def analyze():
 
         # Try wide-format detection first (date-paired plan/amount columns)
         wide = detect_wide_format(mrr_raw)
+        cohort_heatmap_data = None
         if wide is not None:
             mrr = wide
             w1 = [f"Wide-format CSV detected: {wide.attrs.get('date_count', '?')} dates from {wide.attrs.get('start_date', '?')} to {wide.attrs.get('end_date', '?')}",
                    f"Transformed to {len(mrr)} rows with columns: {list(mrr.columns)}"]
+            cohort_heatmap_data = cohort_heatmap(mrr_raw)
         else:
             mrr, w1 = map_cols(mrr_raw, MRR_MAP)
             w1.insert(0, f"CSV#1 columns detected: {list(mrr.columns[:15])}")
@@ -986,7 +1072,7 @@ def analyze():
 
         return jsonify({
             "success": True, "warnings": warns,
-            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp},
+            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp, "cohort_heatmap": cohort_heatmap_data},
             "dashboard2": {"churn_prediction": churn, "at_risk": risk, "growth_signals": None},
             "meta": {
                 "csv1_rows": len(mrr), "csv1_columns": list(mrr.columns[:20]),
