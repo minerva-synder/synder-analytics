@@ -143,6 +143,28 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
       <p class="text-muted">Drop two CSV files to generate Retention Stats & Health Assessment dashboards</p>
     </div>
 
+    <!-- Period Selector -->
+    <div class="card mb-4" style="border:1px solid var(--border);border-radius:12px;">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center gap-3">
+          <strong class="small">📅 Period:</strong>
+          <div class="btn-group btn-group-sm" role="group" id="periodPresets">
+            <button type="button" class="btn btn-outline-primary active" onclick="setPeriod('this_month')">This Month</button>
+            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_month')">Last Month</button>
+            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_3')">Last 3 Months</button>
+            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_6')">Last 6 Months</button>
+            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('custom')">Custom</button>
+          </div>
+          <div class="d-flex align-items-center gap-2" id="customDateRange" style="display:none !important">
+            <input type="date" class="form-control form-control-sm" id="periodStart" style="width:150px">
+            <span>—</span>
+            <input type="date" class="form-control form-control-sm" id="periodEnd" style="width:150px">
+          </div>
+          <span class="text-muted small" id="periodLabel"></span>
+        </div>
+      </div>
+    </div>
+
     <div class="row g-4 mb-4">
       <div class="col-md-6">
         <div class="upload-zone" id="zone1" onclick="document.getElementById('file1').click()">
@@ -165,10 +187,13 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
     </div>
 
     <div class="text-center">
-      <button class="btn btn-primary btn-lg px-5" id="btnAnalyze" onclick="runAnalysis()" disabled>
+      <button class="btn btn-primary btn-lg px-5 me-2" id="btnAnalyze" onclick="runAnalysis()" disabled>
         🚀 Run Analysis
       </button>
-      <p class="text-muted small mt-2">CSV #1 is required. CSV #2 enables health assessment features.</p>
+      <button class="btn btn-outline-primary btn-lg px-4" id="btnAutoFetch" onclick="runAutoFetch()">
+        🔄 Auto-fetch from Retool
+      </button>
+      <p class="text-muted small mt-2">CSV #1 is required. CSV #2 enables health assessment features. Or try auto-fetch from Retool DB.</p>
     </div>
   </div>
 </div>
@@ -381,6 +406,8 @@ async function runAnalysis() {
   const fd = new FormData();
   fd.append('csv1', file1);
   if (file2) fd.append('csv2', file2);
+  if (selectedPeriod.start) fd.append('period_start', selectedPeriod.start);
+  if (selectedPeriod.end) fd.append('period_end', selectedPeriod.end);
 
   try {
     const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
@@ -1273,6 +1300,96 @@ function renderCohortHeatmap(heatmap) {
   });
   html += '</tbody></table></div>';
   el.innerHTML = html;
+}
+
+// ---- Period Selector ----
+let selectedPeriod = { start: '', end: '', preset: 'this_month' };
+
+function setPeriod(preset) {
+  const now = new Date();
+  let start, end;
+
+  // Update button states
+  document.querySelectorAll('#periodPresets .btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+
+  const customEl = $('customDateRange');
+
+  if (preset === 'this_month') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    customEl.style.display = 'none';
+  } else if (preset === 'last_month') {
+    start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth(), 0);
+    customEl.style.display = 'none';
+  } else if (preset === 'last_3') {
+    start = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    customEl.style.display = 'none';
+  } else if (preset === 'last_6') {
+    start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    customEl.style.display = 'none';
+  } else {
+    customEl.style.cssText = 'display:flex !important';
+    selectedPeriod.preset = 'custom';
+    updatePeriodLabel();
+    return;
+  }
+
+  const fmt_d = d => d.toISOString().slice(0, 10);
+  selectedPeriod = { start: fmt_d(start), end: fmt_d(end), preset };
+  $('periodStart').value = selectedPeriod.start;
+  $('periodEnd').value = selectedPeriod.end;
+  updatePeriodLabel();
+}
+
+function updatePeriodLabel() {
+  if (selectedPeriod.preset === 'custom') {
+    const s = $('periodStart').value;
+    const e = $('periodEnd').value;
+    selectedPeriod.start = s;
+    selectedPeriod.end = e;
+    $('periodLabel').textContent = s && e ? `${s} — ${e}` : 'Select dates';
+  } else {
+    $('periodLabel').textContent = `${selectedPeriod.start} — ${selectedPeriod.end}`;
+  }
+}
+
+// Initialize period to current month
+(function() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const fmt_d = d => d.toISOString().slice(0, 10);
+  selectedPeriod = { start: fmt_d(start), end: fmt_d(end), preset: 'this_month' };
+  if ($('periodStart')) $('periodStart').value = selectedPeriod.start;
+  if ($('periodEnd')) $('periodEnd').value = selectedPeriod.end;
+  updatePeriodLabel();
+
+  // Listen for custom date changes
+  if ($('periodStart')) $('periodStart').addEventListener('change', updatePeriodLabel);
+  if ($('periodEnd')) $('periodEnd').addEventListener('change', updatePeriodLabel);
+})();
+
+// ---- Auto-fetch from Retool ----
+async function runAutoFetch() {
+  $('btnAutoFetch').disabled = true;
+  $('btnAutoFetch').textContent = '⏳ Connecting to Retool...';
+  try {
+    const resp = await fetch('/api/auto-fetch', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      alert('Auto-fetch: ' + data.error);
+    } else {
+      alert('Auto-fetch successful! (Implementation in progress)');
+    }
+  } catch (e) {
+    alert('Auto-fetch error: ' + e.message);
+  }
+  $('btnAutoFetch').disabled = false;
+  $('btnAutoFetch').textContent = '🔄 Auto-fetch from Retool';
 }
 
 // ---- Loading ----

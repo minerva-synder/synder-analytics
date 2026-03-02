@@ -66,17 +66,20 @@ def admin_required(f):
 # HubSpot integration
 # ---------------------------------------------------------------------------
 
-def hubspot_search_company_by_org_url(org_url, api_key):
-    """Search HubSpot for a company by Synder Organization Link property."""
-    if not api_key or not org_url:
+def hubspot_search_company_by_org_id(org_id, api_key):
+    """Search HubSpot for a company by synder_organization_id property."""
+    if not api_key or not org_id:
+        return None
+    org_id_str = str(org_id).strip()
+    if not org_id_str:
         return None
     url = "https://api.hubapi.com/crm/v3/objects/companies/search"
     payload = json.dumps({
         "filterGroups": [{
             "filters": [{
-                "propertyName": "synder_organization_link",
+                "propertyName": "synder_organization_id",
                 "operator": "EQ",
-                "value": org_url
+                "value": org_id_str
             }]
         }],
         "properties": ["name", "hubspot_owner_id", "custom_configurations"],
@@ -125,8 +128,7 @@ def hubspot_lookup_org(org_id, api_key, cache):
     if cache_key in cache:
         return cache[cache_key]
 
-    org_url = synder_org_url(org_id_str)
-    props = hubspot_search_company_by_org_url(org_url, api_key)
+    props = hubspot_search_company_by_org_id(org_id_str, api_key)
 
     result = {"csm": "N/A", "custom_configurations": ""}
     if props:
@@ -417,6 +419,79 @@ def cohort_heatmap(mrr_raw):
         month_label = date_months[first_idx]
         retentions = []
         for offset in range(n_dates - first_idx):
+            month_idx = first_idx + offset
+            active_count = sum(1 for m in members if m[month_idx])
+            pct = round(active_count / size * 100, 1)
+            retentions.append(pct)
+        cohorts.append({"month": month_label, "size": size, "retentions": retentions})
+
+    max_months = max(len(c["retentions"]) for c in cohorts) if cohorts else 0
+    return {"cohorts": cohorts, "max_months": max_months}
+
+
+def cohort_heatmap_from_mrr(mrr_raw):
+    """Build cohort retention heatmap from wide-format mrr data using amount columns.
+    Each row = cohort month (first month org had MRR > 0).
+    Each column = months since start (M0, M1, ...).
+    Cell = % of orgs from that cohort still active.
+    Returns dict or None."""
+    cols = list(mrr_raw.columns)
+    amount_cols = [c for c in cols if re.match(r'amount\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+    if len(amount_cols) < 2:
+        return None
+
+    def extract_date(col_name):
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', col_name)
+        return m.group(1) if m else None
+
+    amount_dates = sorted([(extract_date(c), c) for c in amount_cols], key=lambda x: x[0])
+
+    # Group dates by YYYY-MM to get monthly snapshots
+    from collections import OrderedDict
+    monthly = OrderedDict()
+    for ds, col in amount_dates:
+        ym = ds[:7]
+        monthly[ym] = col  # last date in each month wins
+
+    month_keys = list(monthly.keys())
+    month_cols = [monthly[k] for k in month_keys]
+    n_months = len(month_keys)
+
+    if n_months < 2:
+        return None
+
+    # Build per-org active array by month
+    org_active = []
+    for _, row in mrr_raw.iterrows():
+        first_active = None
+        active = []
+        for i, col in enumerate(month_cols):
+            try:
+                v = float(row.get(col, 0) or 0)
+            except Exception:
+                v = 0.0
+            is_active = v > 0
+            active.append(is_active)
+            if is_active and first_active is None:
+                first_active = i
+        if first_active is not None:
+            org_active.append((first_active, active))
+
+    if not org_active:
+        return None
+
+    # Group by cohort month
+    cohort_map = {}
+    for first_idx, active in org_active:
+        cohort_map.setdefault(first_idx, []).append(active)
+
+    cohorts = []
+    for first_idx in sorted(cohort_map.keys()):
+        members = cohort_map[first_idx]
+        size = len(members)
+        month_label = month_keys[first_idx]
+        retentions = []
+        for offset in range(n_months - first_idx):
             month_idx = first_idx + offset
             active_count = sum(1 for m in members if m[month_idx])
             pct = round(active_count / size * 100, 1)
@@ -1298,7 +1373,34 @@ def analyze():
         if not csv1:
             return jsonify({"error": "CSV #1 is required"}), 400
 
+        # Period filtering params
+        period_start = request.form.get("period_start", "").strip()
+        period_end = request.form.get("period_end", "").strip()
+
         mrr_raw = read_csv_safe(csv1)
+
+        # If period filter specified, filter wide-format date columns
+        if period_start or period_end:
+            cols = list(mrr_raw.columns)
+            plan_cols = [c for c in cols if re.match(r'plans\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+            amount_cols = [c for c in cols if re.match(r'amount\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+            if plan_cols and amount_cols:
+                def _extract_date(cn):
+                    m = re.search(r'(\d{4}-\d{2}-\d{2})', cn)
+                    return m.group(1) if m else None
+                keep_dates = set()
+                for c in plan_cols + amount_cols:
+                    d = _extract_date(c)
+                    if d:
+                        if period_start and d < period_start:
+                            continue
+                        if period_end and d > period_end:
+                            continue
+                        keep_dates.add(d)
+                if keep_dates:
+                    non_date_cols = [c for c in cols if not re.match(r'(plans|amount)\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I)]
+                    date_cols = [c for c in cols if re.match(r'(plans|amount)\s*\(\d{4}-\d{2}-\d{2}\)', c, re.I) and _extract_date(c) in keep_dates]
+                    mrr_raw = mrr_raw[non_date_cols + date_cols]
 
         # Try wide-format detection first (date-paired plan/amount columns)
         wide = detect_wide_format(mrr_raw)
@@ -1307,7 +1409,7 @@ def analyze():
             mrr = wide
             w1 = [f"Wide-format CSV detected: {wide.attrs.get('date_count', '?')} dates from {wide.attrs.get('start_date', '?')} to {wide.attrs.get('end_date', '?')}",
                    f"Transformed to {len(mrr)} rows with columns: {list(mrr.columns)}"]
-            cohort_heatmap_data = cohort_heatmap(mrr_raw)
+            cohort_heatmap_data = cohort_heatmap_from_mrr(mrr_raw)
         else:
             mrr, w1 = map_cols(mrr_raw, MRR_MAP)
             w1.insert(0, f"CSV#1 columns detected: {list(mrr.columns[:15])}")
@@ -1566,6 +1668,59 @@ def export_csv(section):
         return send_file(BytesIO(buf.getvalue().encode()), mimetype="text/csv", as_attachment=True,
                          download_name=f"synder_{section}_{date.today()}.csv")
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Retool integration (skeleton)
+# ---------------------------------------------------------------------------
+
+RETOOL_APP_UUID = "9d13f272-3eb5-11ef-8fbd-e3da400a47a2"
+RETOOL_QUERY_NAMES = ["organizations", "subcribed_recently", "synder_acquisition", "users_and_organizations"]
+
+
+def fetch_from_retool(query_name, app_uuid=None, retool_session=None):
+    """Fetch data from Retool by running a named query.
+    Returns a pandas DataFrame or raises an exception.
+    This is a skeleton — full implementation requires Retool API auth flow."""
+    app_uuid = app_uuid or RETOOL_APP_UUID
+    cfg = get_retool_config()
+    retool_url = cfg.get("url", "https://synder.retool.com")
+
+    if not cfg.get("email") or not cfg.get("password"):
+        raise ValueError("Retool credentials not configured. Go to Settings to add them.")
+
+    # Skeleton: In production, this would:
+    # 1. POST to retool_url/api/login with email/password to get session
+    # 2. POST to retool_url/api/apps/{app_uuid}/query/{query_name} with session cookie
+    # 3. Parse the JSON response into a DataFrame
+    raise NotImplementedError(
+        f"Retool auto-fetch not yet implemented. "
+        f"Would run query '{query_name}' on app {app_uuid} at {retool_url}. "
+        f"Please upload CSV manually for now."
+    )
+
+
+@app.route("/api/auto-fetch", methods=["POST"])
+def auto_fetch():
+    """Auto-fetch data from Retool and run analysis."""
+    try:
+        cfg = get_retool_config()
+        if not cfg.get("email") or not cfg.get("password"):
+            return jsonify({"error": "Retool credentials not configured. Go to Admin Settings to add email and password."}), 400
+
+        # Try to fetch data
+        try:
+            orgs_df = fetch_from_retool("organizations")
+            # Would transform and analyze here
+            return jsonify({"success": True, "message": "Auto-fetch complete"})
+        except NotImplementedError as e:
+            return jsonify({"error": str(e)}), 501
+        except Exception as e:
+            return jsonify({"error": f"Retool connection failed: {str(e)}. Please upload CSV manually."}), 503
+
+    except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
