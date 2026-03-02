@@ -44,6 +44,14 @@ def save_config(cfg):
 def get_hubspot_api_key():
     return load_config().get("hubspot_api_key", "")
 
+def get_retool_config():
+    cfg = load_config()
+    return {
+        "url": cfg.get("retool_url", "https://synder.retool.com"),
+        "email": cfg.get("retool_email", ""),
+        "password": cfg.get("retool_password", ""),
+    }
+
 
 def admin_required(f):
     @wraps(f)
@@ -1261,10 +1269,20 @@ def admin_settings():
     if request.method == "POST":
         cfg = load_config()
         cfg["hubspot_api_key"] = request.form.get("hubspot_api_key", "").strip()
+        cfg["retool_url"] = request.form.get("retool_url", "https://synder.retool.com").strip()
+        cfg["retool_email"] = request.form.get("retool_email", "").strip()
+        retool_pw = request.form.get("retool_password", "").strip()
+        if retool_pw:  # Only update password if provided (don't blank it on re-save)
+            cfg["retool_password"] = retool_pw
         save_config(cfg)
         saved = True
     cfg = load_config()
-    return render_template("settings.html", hubspot_api_key=cfg.get("hubspot_api_key", ""), saved=saved)
+    return render_template("settings.html",
+                           hubspot_api_key=cfg.get("hubspot_api_key", ""),
+                           retool_url=cfg.get("retool_url", "https://synder.retool.com"),
+                           retool_email=cfg.get("retool_email", ""),
+                           retool_has_password=bool(cfg.get("retool_password", "")),
+                           saved=saved)
 
 
 @app.route("/")

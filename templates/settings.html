@@ -31,6 +31,21 @@ body { background: #F8FAFC; }
       <input type="password" name="hubspot_api_key" class="form-control" value="{{ hubspot_api_key or '' }}" placeholder="pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
       <div class="form-text">Private app access token. Used to look up CSM and plan details from HubSpot.</div>
     </div>
+    <hr class="my-4">
+    <h5 class="mb-3">Retool Integration</h5>
+    <div class="mb-3">
+      <label class="form-label fw-bold">Retool URL</label>
+      <input type="text" name="retool_url" class="form-control" value="{{ retool_url or 'https://synder.retool.com' }}" placeholder="https://synder.retool.com">
+    </div>
+    <div class="mb-3">
+      <label class="form-label fw-bold">Retool Email</label>
+      <input type="email" name="retool_email" class="form-control" value="{{ retool_email or '' }}" placeholder="your@email.com">
+    </div>
+    <div class="mb-3">
+      <label class="form-label fw-bold">Retool Password</label>
+      <input type="password" name="retool_password" class="form-control" value="" placeholder="{% if retool_has_password %}••••••••  (saved — leave blank to keep){% else %}Enter password{% endif %}">
+      <div class="form-text">Credentials are stored locally and used to fetch data from Retool. Leave password blank to keep existing.</div>
+    </div>
     <button type="submit" class="btn btn-primary">Save Settings</button>
   </form>
 </div>
