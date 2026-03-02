@@ -1569,6 +1569,16 @@ def export_csv(section):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/admin/retool-config", methods=["GET"])
+def api_retool_config():
+    """Return retool config (admin-only, requires auth header)."""
+    auth = request.headers.get("X-Admin-Key", "")
+    if auth != "AdminSynderAnalytics!":
+        return jsonify({"error": "unauthorized"}), 401
+    cfg = get_retool_config()
+    return jsonify(cfg)
+
+
 @app.route("/api/recalc-nrr", methods=["POST"])
 def recalc_nrr():
     """Recalculate NRR excluding specified org_ids (sub migration)."""
