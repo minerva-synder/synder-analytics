@@ -5,6 +5,7 @@ Flask app: two CSVs → two dashboards.
 
 import os, json, re, math, traceback, csv, threading, time, uuid
 from collections import Counter
+from functools import wraps
 from urllib.parse import urlparse, parse_qs, urlparse as _urlparse
 import urllib.request
 import urllib.parse
@@ -13,11 +14,127 @@ from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
+app.secret_key = os.environ.get("SECRET_KEY", "synder-analytics-secret-key-2026")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+# ---------------------------------------------------------------------------
+# Admin auth & settings
+# ---------------------------------------------------------------------------
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "AdminSynderAnalytics!"
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def get_hubspot_api_key():
+    return load_config().get("hubspot_api_key", "")
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ---------------------------------------------------------------------------
+# HubSpot integration
+# ---------------------------------------------------------------------------
+
+def hubspot_search_company_by_org_url(org_url, api_key):
+    """Search HubSpot for a company by Synder Organization Link property."""
+    if not api_key or not org_url:
+        return None
+    url = "https://api.hubapi.com/crm/v3/objects/companies/search"
+    payload = json.dumps({
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "synder_organization_link",
+                "operator": "EQ",
+                "value": org_url
+            }]
+        }],
+        "properties": ["name", "hubspot_owner_id", "custom_configurations"],
+        "limit": 1
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = data.get("results", [])
+        if results:
+            return results[0].get("properties", {})
+    except Exception:
+        pass
+    return None
+
+
+def hubspot_get_owner_name(owner_id, api_key):
+    """Get owner name from HubSpot by owner ID."""
+    if not api_key or not owner_id:
+        return None
+    url = f"https://api.hubapi.com/crm/v3/owners/{owner_id}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {api_key}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        first = data.get("firstName", "")
+        last = data.get("lastName", "")
+        return f"{first} {last}".strip() or None
+    except Exception:
+        return None
+
+
+def hubspot_lookup_org(org_id, api_key, cache):
+    """Look up CSM and custom configs for an org. Returns dict with csm and custom_configurations."""
+    org_id_str = str(org_id).strip() if org_id else ""
+    if not org_id_str or not api_key:
+        return {"csm": "N/A", "custom_configurations": ""}
+
+    cache_key = f"org_{org_id_str}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    org_url = synder_org_url(org_id_str)
+    props = hubspot_search_company_by_org_url(org_url, api_key)
+
+    result = {"csm": "N/A", "custom_configurations": ""}
+    if props:
+        owner_id = props.get("hubspot_owner_id")
+        if owner_id:
+            owner_cache_key = f"owner_{owner_id}"
+            if owner_cache_key in cache:
+                result["csm"] = cache[owner_cache_key]
+            else:
+                name = hubspot_get_owner_name(owner_id, api_key)
+                result["csm"] = name or "N/A"
+                cache[owner_cache_key] = result["csm"]
+        result["custom_configurations"] = props.get("custom_configurations", "") or ""
+
+    cache[cache_key] = result
+    return result
 
 # In-memory job store for growth research (avoids request timeouts)
 GROWTH_JOBS = {}
@@ -551,6 +668,86 @@ def nrr_analysis(mrr):
     }
 
 
+def retention_analysis(mrr, orgs=None):
+    """Compute logo retention and movement stats for the Retention section."""
+    mrr = prepare_mrr(mrr)
+    today = pd.Timestamp.now().normalize()
+
+    # All orgs that had MRR > 0 at start
+    start_active = mrr[mrr["_sm"] > 0].copy()
+    start_count = len(start_active)
+
+    # Churned: had MRR at start, 0 at end
+    churned = start_active[(start_active["_em"] == 0) | start_active["_ep"].isna()]
+    churned_count = len(churned)
+
+    # Downgraded: end plan is a lower tier than start plan
+    def plan_tier_value(p):
+        if not p: return 0
+        if p in HIGH_TOUCH: return 3
+        if p in MEDIUM_TOUCH: return 2
+        if p in SANDBOX_PLANS: return 2  # sandbox ~ pro tier
+        return 1  # essential/basic/etc
+
+    active_still = start_active[~((start_active["_em"] == 0) | start_active["_ep"].isna())]
+    downgraded = active_still[active_still.apply(lambda r: plan_tier_value(r["_sp"]) > plan_tier_value(r["_ep"]), axis=1)]
+    upgraded = active_still[active_still.apply(lambda r: plan_tier_value(r["_sp"]) < plan_tier_value(r["_ep"]), axis=1)]
+
+    # Unsubscribed: have cancellation date set but still active (will churn)
+    unsub_count = 0
+    unsub_accounts = []
+    if orgs is not None and "org_id" in orgs.columns:
+        orgs_c = orgs.copy()
+        orgs_c["_oid"] = orgs_c["org_id"].astype(str)
+        orgs_c["_cd"] = parse_dates(orgs_c.get("cancellation_date", pd.Series(dtype="object")))
+        orgs_c["_se"] = parse_dates(orgs_c.get("subscription_end_date", pd.Series(dtype="object")))
+        ids = set(mrr["org_id"].dropna().astype(str))
+        ic = orgs_c[orgs_c["_oid"].isin(ids)]
+        unsub = ic[(ic["_cd"].notna()) & (ic["_se"].notna()) & (ic["_se"] > today)]
+        unsub_count = len(unsub)
+        mrr_lu = dict(zip(mrr["org_id"].astype(str), mrr["_em"]))
+        unsub_accounts = []
+        for _, r in unsub.head(200).iterrows():
+            oid = str(r["org_id"])
+            unsub_accounts.append({
+                "org_id": oid,
+                "org_name": r.get("org_name", ""),
+                "synder_url": synder_org_url(oid),
+                "mrr": money(mrr_lu.get(oid, 0)),
+            })
+
+    # New MRR: start=0, end>0
+    new_mrr_df = mrr[(mrr["_sm"] == 0) & (mrr["_em"] > 0)]
+    new_mrr_total = money(_s(new_mrr_df, "_em"))
+
+    # Expansion MRR: start>0, end>start
+    exp_df = mrr[(mrr["_sm"] > 0) & (mrr["_em"] > mrr["_sm"])]
+    exp_mrr_total = money(exp_df.apply(lambda r: r["_em"] - r["_sm"], axis=1).sum())
+
+    retained_count = start_count - churned_count
+    logo_retention_pct = round(retained_count / start_count * 100, 2) if start_count else None
+
+    return {
+        "start_count": start_count,
+        "retained_count": retained_count,
+        "logo_retention_pct": logo_retention_pct,
+        "churned_count": churned_count,
+        "churned_accounts": accounts_table(churned),
+        "downgraded_count": len(downgraded),
+        "downgraded_accounts": accounts_table(downgraded),
+        "upgraded_count": len(upgraded),
+        "upgraded_accounts": accounts_table(upgraded),
+        "unsubscribed_count": unsub_count,
+        "unsubscribed_accounts": unsub_accounts,
+        "new_mrr_total": new_mrr_total,
+        "new_mrr_count": len(new_mrr_df),
+        "new_mrr_accounts": accounts_table(new_mrr_df.head(200)),
+        "expansion_mrr_total": exp_mrr_total,
+        "expansion_mrr_count": len(exp_df),
+        "expansion_mrr_accounts": accounts_table(exp_df.head(200)),
+    }
+
+
 def expansion_analysis(mrr):
     mrr = prepare_mrr(mrr)
     mrr["_delta"] = mrr["_em"] - mrr["_sm"]
@@ -643,10 +840,27 @@ def churn_prediction(mrr, orgs):
         wc["org_name"] = wc["_oid"].map(name_lu).fillna("")
 
     valid_cols = [c for c in cols if c in wc.columns]
+    accounts = wc.sort_values("days_to_churn")[valid_cols].head(100).to_dict("records")
+
+    # HubSpot CSM lookup + sandbox detection
+    api_key = get_hubspot_api_key()
+    hs_cache = {}
+    for acc in accounts:
+        oid = acc.get("org_id", "")
+        if api_key and oid:
+            hs = hubspot_lookup_org(oid, api_key, hs_cache)
+            acc["csm"] = hs["csm"]
+            if hs["custom_configurations"] and "enable_pro_sandbox" in hs["custom_configurations"]:
+                plan = acc.get("plan_display", "") or ""
+                if plan.upper() in ("PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE"):
+                    acc["plan_display"] = "Sandbox"
+        else:
+            acc["csm"] = "N/A"
+
     return {
         "total_count": len(wc), "total_mrr_at_risk": money(wc["mrr"].sum()),
         "buckets": buckets,
-        "accounts": wc.sort_values("days_to_churn")[valid_cols].head(100).to_dict("records"),
+        "accounts": accounts,
     }
 
 
@@ -723,8 +937,10 @@ def at_risk_analysis(mrr, orgs):
         ar["org_name"] = ar["_oid"].map(name_lu).fillna("")
 
     accounts = []
+    api_key = get_hubspot_api_key()
+    hs_cache = {}
     for _, r in ar.head(100).iterrows():
-        accounts.append({
+        acc = {
             "org_name": r.get("org_name", ""),
             "org_id": r.get("org_id", ""),
             "plan_name": r.get("_pn", ""),
@@ -738,7 +954,14 @@ def at_risk_analysis(mrr, orgs):
             "failure_ratio": round(float(r["_fr"]), 3) if pd.notna(r["_fr"]) else None,
             "risk_reasons": ", ".join(r["_rr"]),
             "in_grace_window": "yes" if r["_grace"] else "no",
-        })
+        }
+        oid = acc["org_id"]
+        if api_key and oid:
+            hs = hubspot_lookup_org(oid, api_key, hs_cache)
+            acc["csm"] = hs["csm"]
+        else:
+            acc["csm"] = "N/A"
+        accounts.append(acc)
 
     return {"total_at_risk": len(ar), "accounts": accounts, "warnings": []}
 
@@ -1015,6 +1238,35 @@ def research_growth(org_names, max_orgs=50):
 # Routes
 # ---------------------------------------------------------------------------
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if request.form.get("username") == ADMIN_USERNAME and request.form.get("password") == ADMIN_PASSWORD:
+            session["admin_logged_in"] = True
+            return redirect(url_for("admin_settings"))
+        return render_template("login.html", error="Invalid credentials")
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.pop("admin_logged_in", None)
+    return redirect(url_for("index"))
+
+
+@app.route("/admin/settings", methods=["GET", "POST"])
+@admin_required
+def admin_settings():
+    saved = False
+    if request.method == "POST":
+        cfg = load_config()
+        cfg["hubspot_api_key"] = request.form.get("hubspot_api_key", "").strip()
+        save_config(cfg)
+        saved = True
+    cfg = load_config()
+    return render_template("settings.html", hubspot_api_key=cfg.get("hubspot_api_key", ""), saved=saved)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -1064,6 +1316,7 @@ def analyze():
 
         nrr = nrr_analysis(mrr)
         exp = expansion_analysis(mrr)
+        ret = retention_analysis(mrr, orgs)
 
         churn, risk = None, None
         if orgs is not None:
@@ -1072,7 +1325,7 @@ def analyze():
 
         return jsonify({
             "success": True, "warnings": warns,
-            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp, "cohort_heatmap": cohort_heatmap_data},
+            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp, "cohort_heatmap": cohort_heatmap_data, "retention": ret},
             "dashboard2": {"churn_prediction": churn, "at_risk": risk, "growth_signals": None},
             "meta": {
                 "csv1_rows": len(mrr), "csv1_columns": list(mrr.columns[:20]),
@@ -1294,6 +1547,80 @@ def export_csv(section):
         buf.seek(0)
         return send_file(BytesIO(buf.getvalue().encode()), mimetype="text/csv", as_attachment=True,
                          download_name=f"synder_{section}_{date.today()}.csv")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/recalc-nrr", methods=["POST"])
+def recalc_nrr():
+    """Recalculate NRR excluding specified org_ids (sub migration)."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        exclude_ids = set(str(x) for x in data.get("exclude_org_ids", []))
+        nrr_data = data.get("nrr_data")
+        retention_data = data.get("retention_data")
+        if not nrr_data:
+            return jsonify({"error": "nrr_data required"}), 400
+
+        # Recalculate NRR from the provided accounts, excluding specified orgs
+        cohort = nrr_data.get("cohort_accounts", [])
+        starting_mrr = 0
+        ending_mrr = 0
+        churn_mrr = 0
+        contraction_mrr = 0
+        expansion_mrr = 0
+        churned_count = 0
+        retained_count = 0
+
+        for acc in cohort:
+            oid = str(acc.get("org_id", ""))
+            sm = float(acc.get("start_mrr", 0) or 0)
+            em = float(acc.get("end_mrr", 0) or 0)
+            starting_mrr += sm
+
+            if oid in exclude_ids:
+                # Treat as retained with same MRR
+                ending_mrr += sm
+                retained_count += 1
+                continue
+
+            is_churned = em == 0
+            if is_churned:
+                churn_mrr += sm
+                churned_count += 1
+            else:
+                ending_mrr += em
+                retained_count += 1
+                if em > sm:
+                    expansion_mrr += (em - sm)
+                elif em < sm:
+                    contraction_mrr += (sm - em)
+
+        nrr_pct = round(ending_mrr / starting_mrr * 100, 2) if starting_mrr else None
+
+        # Recalculate logo retention if retention_data provided
+        logo_retention = None
+        if retention_data:
+            start_count = retention_data.get("start_count", 0)
+            orig_churned = retention_data.get("churned_count", 0)
+            excluded_churned = len([oid for oid in exclude_ids
+                                     if any(str(a.get("org_id","")) == oid for a in (retention_data.get("churned_accounts") or []))])
+            new_churned = orig_churned - excluded_churned
+            new_retained = start_count - new_churned
+            logo_retention = round(new_retained / start_count * 100, 2) if start_count else None
+
+        return jsonify({
+            "success": True,
+            "nrr_pct": nrr_pct,
+            "starting_mrr": round(starting_mrr, 2),
+            "ending_mrr": round(ending_mrr, 2),
+            "churn_mrr": round(churn_mrr, 2),
+            "contraction_mrr": round(contraction_mrr, 2),
+            "expansion_mrr": round(expansion_mrr, 2),
+            "logo_retention_pct": logo_retention,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

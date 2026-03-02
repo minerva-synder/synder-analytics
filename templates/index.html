@@ -129,7 +129,10 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 
 <nav class="navbar navbar-light px-4">
   <span class="navbar-brand">📊 Synder Analytics</span>
-  <button class="btn btn-sm btn-outline-secondary" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+  <div>
+    <button class="btn btn-sm btn-outline-secondary me-2" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+    <a href="/admin/settings" class="btn btn-sm btn-outline-secondary">⚙️ Settings</a>
+  </div>
 </nav>
 
 <!-- UPLOAD SECTION -->
@@ -203,6 +206,10 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 
       <!-- ==================== TAB 1: RETENTION ==================== -->
       <div class="tab-pane fade show active" id="tab-retention">
+
+        <!-- 0. Retention Overview -->
+        <div class="section-title">Retention</div>
+        <div class="row g-3 mb-3" id="retentionCards"></div>
 
         <!-- 1. Sandbox Cohort -->
         <div class="section-title">1. Sandbox Cohort Analysis</div>
@@ -330,6 +337,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 let file1 = null, file2 = null;
 let analysisResult = null;
 let nrrBreakdownData = [], expansionData = [], churnData = [], atRiskData = [], growthData = [];
+let subMigrationExcludes = new Set(); // org_ids excluded via sub migration
 
 // Table sorting state (per table id)
 let tableSortState = {};
@@ -461,20 +469,6 @@ function renderTagCloud(reasonSummary) {
   return html;
 }
 
-function showDetails(key) {
-  const d = detailsStore[key];
-  if (!d) return;
-  detailsActiveKey = key;
-  $('detailsTitle').textContent = d.title;
-  $('detailsSearch').value = '';
-  $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
-  $('detailsTagCloud').innerHTML = renderTagCloud(d.reasonSummary);
-  $('detailsTable').innerHTML = renderDetailsTable(d.rows);
-
-  const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
-  modal.show();
-}
-
 function getFilteredDetails() {
   if (!detailsActiveKey) return [];
   const d = detailsStore[detailsActiveKey];
@@ -538,6 +532,8 @@ function renderResults(data) {
   const d2 = data.dashboard2;
 
   // ---- Dashboard 1 ----
+  subMigrationExcludes = new Set();
+  if (d1.retention) renderRetention(d1.retention);
   renderSandbox(d1.sandbox_cohort);
   renderNRR(d1.nrr);
   renderExpansion(d1.expansion);
@@ -750,6 +746,7 @@ function renderChurn(ch) {
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
     {key:'plan_display', label:'Plan'},
+    {key:'csm', label:'CSM'},
     {key:'mrr', label:'MRR', fmt: fmt},
     {key:'churn_date', label:'Churn date'},
     {key:'bucket', label:'Bucket'},
@@ -783,6 +780,7 @@ function renderAtRisk(ar) {
     {key:'org_name', label:'Organization'},
     {key:'org_id', label:'Org ID'},
     {key:'plan_name', label:'Plan'},
+    {key:'csm', label:'CSM'},
     {key:'mrr', label:'MRR', fmt: fmt},
     {key:'subscription_start_date', label:'Sub Start'},
     {key:'interval', label:'Interval'},
@@ -918,6 +916,173 @@ function renderGrowthSignals(signals) {
   }, 0);
 
   $('growthTable').innerHTML = html;
+}
+
+// ---- Retention Section ----
+function renderRetention(ret) {
+  if (!ret) { $('retentionCards').innerHTML = ''; return; }
+
+  setDetails('ret_churned', 'Churned orgs', ret.churned_accounts || []);
+  setDetails('ret_downgraded', 'Downgraded orgs', ret.downgraded_accounts || []);
+  setDetails('ret_upgraded', 'Upgraded orgs', ret.upgraded_accounts || []);
+  setDetails('ret_unsub', 'Unsubscribed (will churn)', ret.unsubscribed_accounts || []);
+  setDetails('ret_new_mrr', 'New MRR accounts', ret.new_mrr_accounts || []);
+  setDetails('ret_expansion_mrr', 'Expansion MRR accounts', ret.expansion_mrr_accounts || []);
+
+  $('retentionCards').innerHTML =
+    metricCard('Logo Retention', pct(ret.logo_retention_pct), `${num(ret.retained_count)} of ${num(ret.start_count)} orgs retained`, ret.logo_retention_pct >= 90 ? 'green' : 'amber') +
+    metricCard('Churned', num(ret.churned_count), 'click for list + sub migration', 'red', 'ret_churned') +
+    metricCard('Downgraded', num(ret.downgraded_count), 'click for list', 'amber', 'ret_downgraded') +
+    metricCard('Upgraded', num(ret.upgraded_count), 'click for list', 'green', 'ret_upgraded') +
+    metricCard('Unsubscribed', num(ret.unsubscribed_count), 'cancelled, will churn', 'red', 'ret_unsub') +
+    metricCard('New MRR', fmt(ret.new_mrr_total), num(ret.new_mrr_count) + ' new accounts', 'blue', 'ret_new_mrr') +
+    metricCard('Expansion MRR', fmt(ret.expansion_mrr_total), num(ret.expansion_mrr_count) + ' accounts', 'green', 'ret_expansion_mrr');
+}
+
+// Override showDetails to add sub migration buttons for churned lists
+const _origShowDetails = typeof showDetails === 'function' ? showDetails : null;
+
+function renderDetailsTableWithMigration(rows, key) {
+  if (!rows || !rows.length) return '<p class="text-muted small p-3">No data</p>';
+  const showMigBtn = (key === 'ret_churned' || key === 'nrr_churned' || key === 'nrr_churn_plus_contr');
+
+  const hasLast = rows.some(r => r.last_mrr_before_churn != null);
+  const hasLastDate = rows.some(r => r.last_mrr_date != null);
+  const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
+
+  const cols = [
+    {key:'org_id', label:'Org ID'},
+    {key:'org_name', label:'Organization'},
+    {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+    {key:'start_plan', label:'Start Plan'},
+    {key:'end_plan', label:'End Plan'},
+    ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
+    ...(hasLastDate ? [{key:'last_mrr_date', label:'Last MRR date'}] : []),
+    {key:'end_mrr', label:'End MRR', fmt: fmt},
+    {key:'delta', label:'Delta', fmt: fmt},
+    ...(hasCancelReason ? [{key:'cancel_reason', label:'Cancel Reason'}] : []),
+  ];
+
+  if (showMigBtn) cols.push({key:'_action', label:'Action'});
+
+  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
+  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  rows.forEach(r => {
+    const oid = String(r.org_id || '');
+    const excluded = subMigrationExcludes.has(oid);
+    html += '<tr>';
+    cols.forEach(c => {
+      if (c.key === '_action') {
+        if (excluded) {
+          html += `<td><button class="btn btn-sm btn-outline-secondary" onclick="undoSubMigration('${esc(oid)}')">↩ Undo</button></td>`;
+        } else {
+          html += `<td><button class="btn btn-sm btn-outline-primary" onclick="doSubMigration('${esc(oid)}')">Sub migration</button></td>`;
+        }
+      } else {
+        const val = r[c.key];
+        const display = c.fmt ? c.fmt(val, r) : (val ?? '—');
+        html += `<td>${display}</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function showDetails(key) {
+  const d = detailsStore[key];
+  if (!d) return;
+  detailsActiveKey = key;
+  $('detailsTitle').textContent = d.title;
+  $('detailsSearch').value = '';
+  $('detailsCount').textContent = `${d.rows.length.toLocaleString()} orgs`;
+  $('detailsTagCloud').innerHTML = renderTagCloud(d.reasonSummary);
+
+  const hasMigration = (key === 'ret_churned' || key === 'nrr_churned' || key === 'nrr_churn_plus_contr');
+  if (hasMigration) {
+    $('detailsTable').innerHTML = renderDetailsTableWithMigration(d.rows, key);
+  } else {
+    $('detailsTable').innerHTML = renderDetailsTable(d.rows);
+  }
+
+  const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
+  modal.show();
+}
+
+async function doSubMigration(orgId) {
+  subMigrationExcludes.add(orgId);
+  await recalcNrrWithExclusions();
+  // Re-render current modal
+  if (detailsActiveKey) {
+    const d = detailsStore[detailsActiveKey];
+    if (d) $('detailsTable').innerHTML = renderDetailsTableWithMigration(d.rows, detailsActiveKey);
+  }
+}
+
+async function undoSubMigration(orgId) {
+  subMigrationExcludes.delete(orgId);
+  await recalcNrrWithExclusions();
+  if (detailsActiveKey) {
+    const d = detailsStore[detailsActiveKey];
+    if (d) $('detailsTable').innerHTML = renderDetailsTableWithMigration(d.rows, detailsActiveKey);
+  }
+}
+
+async function recalcNrrWithExclusions() {
+  if (!analysisResult) return;
+  const nrr = analysisResult.dashboard1.nrr;
+  const ret = analysisResult.dashboard1.retention;
+  try {
+    const resp = await fetch('/api/recalc-nrr', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        exclude_org_ids: Array.from(subMigrationExcludes),
+        nrr_data: nrr,
+        retention_data: ret,
+      })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      // Update NRR display
+      const suffix = subMigrationExcludes.size > 0 ? ` (${subMigrationExcludes.size} migrated)` : '';
+      const nrrEl = $('nrrCards');
+      if (nrrEl) {
+        // Rebuild NRR cards with adjusted values
+        setDetails('nrr_cohort', 'NRR cohort (High + Medium touch at start)', nrr.cohort_accounts || []);
+        setDetails('nrr_expansion', 'NRR — expansion accounts', nrr.expansion_accounts || []);
+        setDetails('nrr_churned', 'NRR — churned accounts', nrr.churned_accounts || [], nrr.cancel_reason_summary || null);
+        setDetails('nrr_contraction', 'NRR — contraction accounts', nrr.contraction_accounts || []);
+        setDetails('nrr_churn_plus_contr', 'NRR — churn + contraction', [...(nrr.churned_accounts||[]), ...(nrr.contraction_accounts||[])], nrr.cancel_reason_summary || null);
+
+        nrrEl.innerHTML =
+          metricCard('NRR' + suffix, pct(data.nrr_pct), 'click to view cohort', data.nrr_pct >= 100 ? 'green' : 'red', 'nrr_cohort') +
+          metricCard('Starting MRR', fmt(data.starting_mrr), '', 'blue', 'nrr_cohort') +
+          metricCard('Expansion', fmt(data.expansion_mrr), '', 'green', 'nrr_expansion') +
+          metricCard('Churn + Contraction', fmt(data.churn_mrr + data.contraction_mrr), 'Churn: ' + fmt(data.churn_mrr) + ' | Contract: ' + fmt(data.contraction_mrr), 'red', 'nrr_churn_plus_contr');
+      }
+      // Update retention logo if available
+      if (data.logo_retention_pct != null && ret) {
+        const retEl = $('retentionCards');
+        if (retEl) {
+          const adjRetained = ret.start_count - (ret.churned_count - subMigrationExcludes.size);
+          retEl.innerHTML =
+            metricCard('Logo Retention' + suffix, pct(data.logo_retention_pct), `${num(adjRetained)} of ${num(ret.start_count)} orgs retained`, data.logo_retention_pct >= 90 ? 'green' : 'amber') +
+            metricCard('Churned', num(ret.churned_count - subMigrationExcludes.size), 'click for list + sub migration', 'red', 'ret_churned') +
+            metricCard('Downgraded', num(ret.downgraded_count), 'click for list', 'amber', 'ret_downgraded') +
+            metricCard('Upgraded', num(ret.upgraded_count), 'click for list', 'green', 'ret_upgraded') +
+            metricCard('Unsubscribed', num(ret.unsubscribed_count), 'cancelled, will churn', 'red', 'ret_unsub') +
+            metricCard('New MRR', fmt(ret.new_mrr_total), num(ret.new_mrr_count) + ' new accounts', 'blue', 'ret_new_mrr') +
+            metricCard('Expansion MRR', fmt(ret.expansion_mrr_total), num(ret.expansion_mrr_count) + ' accounts', 'green', 'ret_expansion_mrr');
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Sub migration recalc failed:', e);
+  }
 }
 
 // ---- Table Helpers ----
