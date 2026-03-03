@@ -14,6 +14,7 @@ from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
 import pandas as pd
+import requests as _requests_lib
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 
 app = Flask(__name__)
@@ -546,8 +547,8 @@ ORGS_MAP = {
     "plan_name": ["plan_name", "plan", "plan_bucket", "current_plan", "end_plan", "plans", "product name"],
     "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date", "sub started"],
     "subscription_interval": ["subscription_interval", "sub_interval", "interval", "billing_interval", "sub interval"],
-    "cancellation_date": ["cancellation_date", "unsubscribe_date", "cancel_date", "unsubscribe date"],
-    "subscription_end_date": ["subscription_end_date", "sub_end_date", "end_date", "sub end date"],
+    "cancellation_date": ["cancellation_date", "unsubscribe_date", "unsub_date", "cancel_date", "unsubscribe date"],
+    "subscription_end_date": ["subscription_end_date", "sub_end_date", "sub_end", "end_date", "sub end date"],
     "total_syncs": ["total_syncs", "sync_volume_total", "total_sync_count", "total syncs"],
     "finished_syncs": ["finished_syncs", "successful_syncs", "finished syncs"],
     "failed_syncs": ["failed_syncs", "failed_sync_count", "failed syncs"],
@@ -1677,7 +1678,7 @@ def export_csv(section):
 
 RETOOL_WORKFLOW_ID = "987547fe-7a4d-4e4a-ac71-c4d57ba7261d"
 RETOOL_WORKFLOW_API_KEY = "retool_wk_0bf98a7c0e9448a98f823a4d50bd76ff"
-RETOOL_WORKFLOW_URL = f"https://api.retool.com/v1/workflows/{RETOOL_WORKFLOW_ID}/startTrigger?workflowApiKey={RETOOL_WORKFLOW_API_KEY}"
+RETOOL_WORKFLOW_URL = f"https://api.retool.com/v1/workflows/{RETOOL_WORKFLOW_ID}/startTrigger"
 RETOOL_APP_UUID = "9d13f272-3eb5-11ef-8fbd-e3da400a47a2"
 
 
@@ -1703,16 +1704,14 @@ def _extract_rows_from_retool_response(raw):
 
 def fetch_retool_webhook(query_name="organizations"):
     """POST to Retool Workflow webhook and return raw JSON response."""
-    payload = json.dumps({"query_name": query_name}).encode("utf-8")
-    req = urllib.request.Request(
+    resp = _requests_lib.post(
         RETOOL_WORKFLOW_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-        }
+        json={"query_name": query_name},
+        headers={"X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY},
+        timeout=60,
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    resp.raise_for_status()
+    return resp.json()
 
 
 def build_dataframes_from_rows(rows):
@@ -1729,12 +1728,15 @@ def build_dataframes_from_rows(rows):
     mrr_map_live = {
         "org_id": ["org_id", "organization_id", "id"],
         "org_name": ["org_name", "organization_name", "name"],
-        "start_plan": ["plan_name", "plan", "current_plan"],
-        "end_plan": ["plan_name", "plan", "current_plan"],
-        "start_mrr": ["mrr", "sub_amount", "amount", "mrr_current"],
+        "end_plan": ["plans", "plan_name", "plan", "current_plan"],
         "end_mrr": ["mrr", "sub_amount", "amount", "mrr_current"],
     }
     mrr_df, mrr_warns = map_cols(df, mrr_map_live)
+    # For live point-in-time data, start = end (single snapshot)
+    if "end_plan" in mrr_df.columns:
+        mrr_df["start_plan"] = mrr_df["end_plan"]
+    if "end_mrr" in mrr_df.columns:
+        mrr_df["start_mrr"] = mrr_df["end_mrr"]
     if "org_id" in mrr_df.columns:
         mrr_df["org_id"] = mrr_df["org_id"].astype(str).str.strip()
         mrr_df = mrr_df.drop_duplicates(subset=["org_id"], keep="last")
