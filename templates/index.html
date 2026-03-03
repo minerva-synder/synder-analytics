@@ -1344,14 +1344,16 @@ function setPeriod(preset) {
 }
 
 function updatePeriodLabel() {
+  const lbl = $('periodLabel');
+  if (!lbl) return;
   if (selectedPeriod.preset === 'custom') {
     const s = $('periodStart').value;
     const e = $('periodEnd').value;
     selectedPeriod.start = s;
     selectedPeriod.end = e;
-    $('periodLabel').textContent = s && e ? `${s} — ${e}` : 'Select dates';
+    lbl.textContent = s && e ? `${s} — ${e}` : 'Select dates';
   } else {
-    $('periodLabel').textContent = `${selectedPeriod.start} — ${selectedPeriod.end}`;
+    lbl.textContent = `${selectedPeriod.start} — ${selectedPeriod.end}`;
   }
 }
 
