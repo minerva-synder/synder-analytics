@@ -1675,8 +1675,9 @@ def export_csv(section):
 # Retool Workflow integration
 # ---------------------------------------------------------------------------
 
-RETOOL_WORKFLOW_URL = "https://api.retool.com/v1/workflows/987547fe-7a4d-4e4a-ac71-c4d57ba7261d/startTrigger"
+RETOOL_WORKFLOW_ID = "987547fe-7a4d-4e4a-ac71-c4d57ba7261d"
 RETOOL_WORKFLOW_API_KEY = "retool_wk_0bf98a7c0e9448a98f823a4d50bd76ff"
+RETOOL_WORKFLOW_URL = f"https://api.retool.com/v1/workflows/{RETOOL_WORKFLOW_ID}/startTrigger?workflowApiKey={RETOOL_WORKFLOW_API_KEY}"
 RETOOL_APP_UUID = "9d13f272-3eb5-11ef-8fbd-e3da400a47a2"
 
 
@@ -1708,7 +1709,6 @@ def fetch_retool_webhook(query_name="organizations"):
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY,
         }
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
