@@ -1447,6 +1447,9 @@ function refetchWithPeriod() {
 
 // ---- Auto-fetch on page load ----
 window.addEventListener('DOMContentLoaded', () => {
+  // Auto-refresh when dates change
+  if ($('periodStart')) $('periodStart').addEventListener('change', refetchWithPeriod);
+  if ($('periodEnd')) $('periodEnd').addEventListener('change', refetchWithPeriod);
   runFetchData();
 });
 
