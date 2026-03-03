@@ -248,12 +248,57 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div class="chart-container mb-4"><canvas id="nrrWaterfall"></canvas></div>
         <div class="table-wrapper" id="nrrTable"></div>
 
+        <!-- NRR by Touch Tier -->
+        <div class="section-title">2b. NRR by Touch Tier</div>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Scale, Enterprise)</h6>
+            <div class="row g-3 mb-2" id="nrrTouchHighMed"></div>
+          </div>
+          <div class="col-md-6">
+            <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
+            <div class="row g-3 mb-2" id="nrrTouchLow"></div>
+          </div>
+        </div>
+
         <!-- 3. Expansion MRR -->
         <div class="section-title">3. Expansion MRR
           <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('expansion', expansionData)">⬇ Export CSV</button>
         </div>
         <div class="row g-3 mb-3" id="expansionCards"></div>
         <div class="table-wrapper" id="expansionTable"></div>
+
+        <!-- Expansion by Touch Tier -->
+        <div class="section-title">3b. Expansion by Touch Tier</div>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <h6 class="text-muted mb-2">High/Med Touch</h6>
+            <div class="row g-3 mb-2" id="expTouchHighMed"></div>
+          </div>
+          <div class="col-md-6">
+            <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
+            <div class="row g-3 mb-2" id="expTouchLow"></div>
+          </div>
+        </div>
+
+        <!-- 4. Retention Cohorts -->
+        <div class="section-title">4. Retention by Plan Cohort</div>
+        <ul class="nav nav-tabs mb-3" id="cohortTabs">
+          <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#cohort-high-med">High/Med Touch</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-essential">Essential</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-basic">Basic</a></li>
+        </ul>
+        <div class="tab-content">
+          <div class="tab-pane fade show active" id="cohort-high-med">
+            <div class="row g-3 mb-3" id="cohortHighMedCards"></div>
+          </div>
+          <div class="tab-pane fade" id="cohort-essential">
+            <div class="row g-3 mb-3" id="cohortEssentialCards"></div>
+          </div>
+          <div class="tab-pane fade" id="cohort-basic">
+            <div class="row g-3 mb-3" id="cohortBasicCards"></div>
+          </div>
+        </div>
       </div>
 
       <!-- ==================== TAB 2: HEALTH ==================== -->
@@ -553,6 +598,7 @@ function renderResults(data) {
   renderNRR(d1.nrr);
   renderExpansion(d1.expansion);
   renderCohortHeatmap(d1.cohort_heatmap || null);
+  if (d1.cohort_data) renderCohortData(d1.cohort_data);
 
   // ---- Dashboard 2 ----
   if (d2.churn_prediction) renderChurn(d2.churn_prediction);
@@ -657,7 +703,7 @@ function renderNRR(nrr) {
     {key:'expansion', label:'Expansion', fmt: fmt},
     {key:'contraction', label:'Contraction', fmt: fmt},
     {key:'churn_mrr', label:'Churn MRR', fmt: fmt},
-  ]);
+  ], { tableId: 'tbl_nrr_breakdown', sortable: true });
 }
 
 function renderWaterfall(canvasId, nrr) {
@@ -726,6 +772,77 @@ function renderExpansion(exp) {
     {key:'current_mrr', label:'Current MRR', fmt: v => fmt(parseFloat(v))},
     {key:'delta', label:'Delta', fmt: v => fmt(parseFloat(v))},
   ], { tableId: 'tbl_expansion_mrr', sortable: true });
+}
+
+function renderNrrTouchTier(elId, data, prefix) {
+  if (!data) { $(elId).innerHTML = '<p class="text-muted small">No data</p>'; return; }
+  const key_churned = prefix + '_churned';
+  const key_exp = prefix + '_exp';
+  setDetails(key_churned, data.label + ' — churned', data.churned_accounts || []);
+  setDetails(key_exp, data.label + ' — expansion', data.expansion_accounts || []);
+
+  $(elId).innerHTML =
+    metricCard('NRR', pct(data.nrr_pct), `${num(data.start_count)} orgs`, data.nrr_pct >= 100 ? 'green' : 'red') +
+    metricCard('Start MRR', fmt(data.starting_mrr), '', 'blue') +
+    metricCard('Expansion', fmt(data.expansion_mrr), '', 'green', key_exp) +
+    metricCard('Churn', fmt(data.churn_mrr), '', 'red', key_churned);
+}
+
+function renderExpTouchTier(elId, data, prefix) {
+  if (!data) { $(elId).innerHTML = '<p class="text-muted small">No data</p>'; return; }
+  const key_exp = prefix + '_expanders';
+  const key_new = prefix + '_new';
+  setDetails(key_exp, data.label + ' — expanders', data.all_expanders || []);
+  setDetails(key_new, data.label + ' — new MRR', data.new_mrr_accounts || []);
+
+  $(elId).innerHTML =
+    metricCard('Expansion MRR', fmt(data.total_expansion_mrr), num(data.expander_count) + ' accounts', 'green', key_exp) +
+    metricCard('New MRR', fmt(data.new_mrr_total), num(data.new_mrr_count) + ' accounts', 'blue', key_new);
+}
+
+function renderCohortCards(elId, cohort, prefix) {
+  if (!cohort) { $(elId).innerHTML = '<p class="text-muted small">No data</p>'; return; }
+  const ret = cohort.retention || {};
+  const nrr = cohort.nrr || {};
+  const exp = cohort.expansion || {};
+
+  const k_churned = prefix + '_coh_churned';
+  const k_exp = prefix + '_coh_exp';
+  const k_new = prefix + '_coh_new';
+  setDetails(k_churned, (nrr.label || '') + ' — churned', nrr.churned_accounts || []);
+  setDetails(k_exp, (exp.label || '') + ' — expanders', exp.all_expanders || []);
+  setDetails(k_new, (exp.label || '') + ' — new MRR', exp.new_mrr_accounts || []);
+
+  $(elId).innerHTML =
+    metricCard('Logo Retention', pct(ret.logo_retention_pct), `${num(ret.retained_count)} of ${num(ret.start_count)}`, ret.logo_retention_pct >= 90 ? 'green' : 'amber') +
+    metricCard('Churned', num(ret.churned_count), '', 'red', k_churned) +
+    metricCard('NRR', pct(nrr.nrr_pct), `Start: ${fmt(nrr.starting_mrr)}`, nrr.nrr_pct >= 100 ? 'green' : 'red') +
+    metricCard('Expansion MRR', fmt(exp.total_expansion_mrr), num(exp.expander_count) + ' accounts', 'green', k_exp) +
+    metricCard('New MRR', fmt(exp.new_mrr_total), num(exp.new_mrr_count) + ' accounts', 'blue', k_new) +
+    metricCard('Churn MRR', fmt(nrr.churn_mrr), '', 'red');
+}
+
+function renderCohortData(cd) {
+  if (!cd) return;
+
+  // NRR by touch tier
+  if (cd.nrr_by_touch) {
+    renderNrrTouchTier('nrrTouchHighMed', cd.nrr_by_touch.high_med, 'ntt_hm');
+    renderNrrTouchTier('nrrTouchLow', cd.nrr_by_touch.low, 'ntt_low');
+  }
+
+  // Expansion by touch tier
+  if (cd.expansion_by_touch) {
+    renderExpTouchTier('expTouchHighMed', cd.expansion_by_touch.high_med, 'ett_hm');
+    renderExpTouchTier('expTouchLow', cd.expansion_by_touch.low, 'ett_low');
+  }
+
+  // Retention cohort tabs
+  if (cd.cohorts) {
+    renderCohortCards('cohortHighMedCards', cd.cohorts.high_med, 'hm');
+    renderCohortCards('cohortEssentialCards', cd.cohorts.essential, 'ess');
+    renderCohortCards('cohortBasicCards', cd.cohorts.basic, 'bas');
+  }
 }
 
 function renderChurn(ch) {

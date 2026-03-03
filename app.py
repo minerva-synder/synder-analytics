@@ -164,6 +164,15 @@ SANDBOX_PLANS = {"PRO_SANDBOX", "SANDBOX"}
 HIGH_TOUCH = {"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "PREMIUM_SPLIT_LICENSE", "SMALL_ENTERPRISE"}
 MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"}
 NRR_PLANS = HIGH_TOUCH | MEDIUM_TOUCH
+
+# Retention cohorts
+COHORT_HIGH_MED = {"PRO", "PREMIUM", "LARGE", "SCALE", "SMALL_ENTERPRISE", "PRO_SPLIT_LICENSE", "PREMIUM_SPLIT_LICENSE"}
+COHORT_ESSENTIAL = {"ESSENTIAL"}
+COHORT_BASIC = {"STARTER", "MEDIUM", "SMALL"}
+
+# NRR touch tiers
+TOUCH_HIGH_MED = COHORT_HIGH_MED
+TOUCH_LOW = COHORT_ESSENTIAL | COHORT_BASIC
 BASE_PLANS = SANDBOX_PLANS | HIGH_TOUCH | MEDIUM_TOUCH | {"ESSENTIAL", "MEDIUM", "SCALE", "BASIC", "STARTER"}
 # Add-ons to skip when finding the base plan
 ADDON_PLANS = {"SALES_VOLUME", "ADDITIONAL_USER", "SMART_RULE_UP_TO_10", "SMART_RULE_UP_TO_30",
@@ -856,6 +865,131 @@ def expansion_analysis(mrr):
     }
 
 
+def _filter_mrr_by_plans(mrr, plan_set, use_start=True):
+    """Filter mrr DataFrame to orgs whose start OR end plan is in plan_set."""
+    mrr = prepare_mrr(mrr)
+    if use_start:
+        mask = mrr["_sp"].isin(plan_set) | mrr["_ep"].isin(plan_set)
+    else:
+        mask = mrr["_ep"].isin(plan_set)
+    return mrr[mask].copy()
+
+
+def cohort_nrr_analysis(mrr, plan_set, label=""):
+    """Run NRR analysis filtered to orgs whose start plan is in plan_set."""
+    mrr = prepare_mrr(mrr)
+    cohort = mrr[(mrr["_sp"].isin(plan_set)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
+    if cohort.empty:
+        return {"label": label, "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
+                "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
+                "start_count": 0, "churned_count": 0, "retained_count": 0}
+
+    starting = _s(cohort, "_sm")
+    cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
+    cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
+    retained = cohort["_ret"].sum()
+    churn = _s(cohort[cohort["_churned"]], "_sm")
+    active = cohort[~cohort["_churned"]]
+    exp = active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
+    contr = active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
+
+    return {
+        "label": label,
+        "nrr_pct": round(safe_div(retained, starting) * 100, 2) if safe_div(retained, starting) else None,
+        "starting_mrr": money(starting), "ending_mrr": money(retained),
+        "churn_mrr": money(churn), "contraction_mrr": money(contr),
+        "expansion_mrr": money(exp),
+        "start_count": len(cohort),
+        "churned_count": int(cohort["_churned"].sum()),
+        "retained_count": int((~cohort["_churned"]).sum()),
+        "churned_accounts": accounts_table(cohort[cohort["_churned"]]),
+        "expansion_accounts": accounts_table(active[active["_em"] > active["_sm"]]),
+        "contraction_accounts": accounts_table(active[active["_em"] < active["_sm"]]),
+    }
+
+
+def cohort_expansion_analysis(mrr, plan_set, label=""):
+    """Run expansion analysis filtered to a cohort."""
+    mrr = prepare_mrr(mrr)
+    subset = mrr[mrr["_sp"].isin(plan_set) | mrr["_ep"].isin(plan_set)].copy()
+    subset["_delta"] = subset["_em"] - subset["_sm"]
+    exp = subset[(subset["_sm"] > 0) & (subset["_delta"] > 0)].sort_values("_delta", ascending=False)
+    new_mrr = subset[(subset["_sm"] == 0) & (subset["_em"] > 0)].sort_values("_em", ascending=False)
+
+    return {
+        "label": label,
+        "total_expansion_mrr": money(_s(exp, "_delta")),
+        "expander_count": len(exp),
+        "all_expanders": accounts_table(exp.head(200)),
+        "new_mrr_total": money(_s(new_mrr, "_em")),
+        "new_mrr_count": int(len(new_mrr)),
+        "new_mrr_accounts": accounts_table(new_mrr.head(200)),
+    }
+
+
+def cohort_retention_analysis(mrr, plan_set, label=""):
+    """Run logo retention filtered to a cohort."""
+    mrr = prepare_mrr(mrr)
+    start_active = mrr[(mrr["_sm"] > 0) & (mrr["_sp"].isin(plan_set))].copy()
+    start_count = len(start_active)
+    if start_count == 0:
+        return {"label": label, "start_count": 0, "retained_count": 0,
+                "logo_retention_pct": None, "churned_count": 0,
+                "churned_accounts": [], "expansion_mrr_total": 0, "new_mrr_total": 0}
+
+    churned = start_active[(start_active["_em"] == 0) | start_active["_ep"].isna()]
+    churned_count = len(churned)
+    retained_count = start_count - churned_count
+    logo_retention_pct = round(retained_count / start_count * 100, 2) if start_count else None
+
+    exp_df = mrr[(mrr["_sm"] > 0) & (mrr["_em"] > mrr["_sm"]) & (mrr["_sp"].isin(plan_set) | mrr["_ep"].isin(plan_set))]
+    exp_mrr = money(exp_df.apply(lambda r: r["_em"] - r["_sm"], axis=1).sum())
+
+    new_mrr_df = mrr[(mrr["_sm"] == 0) & (mrr["_em"] > 0) & (mrr["_ep"].isin(plan_set))]
+    new_mrr_total = money(_s(new_mrr_df, "_em"))
+
+    return {
+        "label": label,
+        "start_count": start_count,
+        "retained_count": retained_count,
+        "logo_retention_pct": logo_retention_pct,
+        "churned_count": churned_count,
+        "churned_accounts": accounts_table(churned),
+        "expansion_mrr_total": exp_mrr,
+        "new_mrr_total": new_mrr_total,
+    }
+
+
+def build_cohort_data(mrr):
+    """Build cohort-specific analysis for all three cohorts + NRR touch tiers."""
+    cohorts = {
+        "high_med": {
+            "nrr": cohort_nrr_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
+            "expansion": cohort_expansion_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
+            "retention": cohort_retention_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
+        },
+        "essential": {
+            "nrr": cohort_nrr_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
+            "expansion": cohort_expansion_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
+            "retention": cohort_retention_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
+        },
+        "basic": {
+            "nrr": cohort_nrr_analysis(mrr, COHORT_BASIC, "Basic"),
+            "expansion": cohort_expansion_analysis(mrr, COHORT_BASIC, "Basic"),
+            "retention": cohort_retention_analysis(mrr, COHORT_BASIC, "Basic"),
+        },
+    }
+    nrr_by_touch = {
+        "high_med": cohort_nrr_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
+        "low": cohort_nrr_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)"),
+    }
+    expansion_by_touch = {
+        "high_med": cohort_expansion_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
+        "low": cohort_expansion_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)"),
+    }
+    return {"cohorts": cohorts, "nrr_by_touch": nrr_by_touch, "expansion_by_touch": expansion_by_touch}
+
+
 # ---------------------------------------------------------------------------
 # Dashboard 2: Health Assessment
 # ---------------------------------------------------------------------------
@@ -1450,7 +1584,7 @@ def analyze():
 
         return jsonify({
             "success": True, "warnings": warns,
-            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp, "cohort_heatmap": cohort_heatmap_data, "retention": ret},
+            "dashboard1": {"sandbox_cohort": sb, "nrr": nrr, "expansion": exp, "cohort_heatmap": cohort_heatmap_data, "retention": ret, "cohort_data": build_cohort_data(mrr)},
             "dashboard2": {"churn_prediction": churn, "at_risk": risk, "growth_signals": None},
             "meta": {
                 "csv1_rows": len(mrr), "csv1_columns": list(mrr.columns[:20]),
@@ -1765,6 +1899,12 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     exp = expansion_analysis(mrr_df)
     ret = retention_analysis(mrr_df, orgs_df if orgs_df is not None and not orgs_df.empty else None)
 
+    # Cohort breakdowns
+    try:
+        cohort_data = build_cohort_data(mrr_df)
+    except Exception:
+        cohort_data = None
+
     churn, risk = None, None
     if orgs_df is not None and not orgs_df.empty and "org_id" in orgs_df.columns:
         try:
@@ -1785,6 +1925,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
             "expansion": exp,
             "cohort_heatmap": None,
             "retention": ret,
+            "cohort_data": cohort_data,
         },
         "dashboard2": {
             "churn_prediction": churn,
@@ -1844,6 +1985,18 @@ def _trim_response(result, max_accounts=50):
     # At-risk
     ar = d2.get("at_risk", {})
     trim_list(ar, "accounts")
+
+    # Cohort data
+    cd = d1.get("cohort_data", {})
+    if cd:
+        for tier in ["cohorts", "nrr_by_touch", "expansion_by_touch"]:
+            group = cd.get(tier, {})
+            if isinstance(group, dict):
+                for k, v in group.items():
+                    if isinstance(v, dict):
+                        for key in list(v.keys()):
+                            if isinstance(v.get(key), list) and "account" in key:
+                                trim_list(v, key)
 
 
 @app.route("/api/fetch-data", methods=["GET", "POST"])
