@@ -1672,56 +1672,162 @@ def export_csv(section):
 
 
 # ---------------------------------------------------------------------------
-# Retool integration (skeleton)
+# Retool Workflow integration
 # ---------------------------------------------------------------------------
 
+RETOOL_WORKFLOW_URL = "https://api.retool.com/v1/workflows/987547fe-7a4d-4e4a-ac71-c4d57ba7261d/startTrigger"
+RETOOL_WORKFLOW_API_KEY = "retool_wk_0bf98a7c0e9448a98f823a4d50bd76ff"
 RETOOL_APP_UUID = "9d13f272-3eb5-11ef-8fbd-e3da400a47a2"
-RETOOL_QUERY_NAMES = ["organizations", "subcribed_recently", "synder_acquisition", "users_and_organizations"]
 
 
-def fetch_from_retool(query_name, app_uuid=None, retool_session=None):
-    """Fetch data from Retool by running a named query.
-    Returns a pandas DataFrame or raises an exception.
-    This is a skeleton — full implementation requires Retool API auth flow."""
-    app_uuid = app_uuid or RETOOL_APP_UUID
-    cfg = get_retool_config()
-    retool_url = cfg.get("url", "https://synder.retool.com")
+def _extract_rows_from_retool_response(raw):
+    """Parse rows from various Retool webhook response shapes."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        # Common Retool response keys
+        for key in ["data", "results", "rows", "records"]:
+            if key in raw and isinstance(raw[key], list):
+                return raw[key]
+        # Nested under "output"
+        out = raw.get("output")
+        if isinstance(out, list):
+            return out
+        if isinstance(out, dict):
+            for key in ["data", "results", "rows"]:
+                if key in out and isinstance(out[key], list):
+                    return out[key]
+    return []
 
-    if not cfg.get("email") or not cfg.get("password"):
-        raise ValueError("Retool credentials not configured. Go to Settings to add them.")
 
-    # Skeleton: In production, this would:
-    # 1. POST to retool_url/api/login with email/password to get session
-    # 2. POST to retool_url/api/apps/{app_uuid}/query/{query_name} with session cookie
-    # 3. Parse the JSON response into a DataFrame
-    raise NotImplementedError(
-        f"Retool auto-fetch not yet implemented. "
-        f"Would run query '{query_name}' on app {app_uuid} at {retool_url}. "
-        f"Please upload CSV manually for now."
+def fetch_retool_webhook(query_name="organizations"):
+    """POST to Retool Workflow webhook and return raw JSON response."""
+    payload = json.dumps({"query_name": query_name}).encode("utf-8")
+    req = urllib.request.Request(
+        RETOOL_WORKFLOW_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY,
+        }
     )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def build_dataframes_from_rows(rows):
+    """Convert rows (list of dicts) to (mrr_df, orgs_df) for analysis."""
+    df = pd.DataFrame(rows)
+
+    # Map to the orgs schema (for health/churn analysis)
+    orgs_df, warns = map_cols(df, ORGS_MAP)
+    if "org_id" in orgs_df.columns:
+        orgs_df["org_id"] = orgs_df["org_id"].astype(str).str.strip()
+        orgs_df = orgs_df.drop_duplicates(subset=["org_id"], keep="last")
+
+    # Build MRR dataframe — start_mrr = end_mrr = current MRR (point-in-time)
+    mrr_map_live = {
+        "org_id": ["org_id", "organization_id", "id"],
+        "org_name": ["org_name", "organization_name", "name"],
+        "start_plan": ["plan_name", "plan", "current_plan"],
+        "end_plan": ["plan_name", "plan", "current_plan"],
+        "start_mrr": ["mrr", "sub_amount", "amount", "mrr_current"],
+        "end_mrr": ["mrr", "sub_amount", "amount", "mrr_current"],
+    }
+    mrr_df, mrr_warns = map_cols(df, mrr_map_live)
+    if "org_id" in mrr_df.columns:
+        mrr_df["org_id"] = mrr_df["org_id"].astype(str).str.strip()
+        mrr_df = mrr_df.drop_duplicates(subset=["org_id"], keep="last")
+
+    return mrr_df, orgs_df, warns + mrr_warns
+
+
+def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
+    """Run full analysis suite and return the JSON-serializable result dict."""
+    sb, sw = sandbox_analysis(mrr_df)
+    warns += sw
+    if orgs_df is not None and not orgs_df.empty:
+        sb = enrich_sandbox(sb, mrr_df, orgs_df)
+
+    nrr = nrr_analysis(mrr_df)
+    exp = expansion_analysis(mrr_df)
+    ret = retention_analysis(mrr_df, orgs_df if orgs_df is not None and not orgs_df.empty else None)
+
+    churn, risk = None, None
+    if orgs_df is not None and not orgs_df.empty and "org_id" in orgs_df.columns:
+        try:
+            churn = churn_prediction(mrr_df, orgs_df)
+        except Exception:
+            pass
+        try:
+            risk = at_risk_analysis(mrr_df, orgs_df)
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "warnings": warns,
+        "dashboard1": {
+            "sandbox_cohort": sb,
+            "nrr": nrr,
+            "expansion": exp,
+            "cohort_heatmap": None,
+            "retention": ret,
+        },
+        "dashboard2": {
+            "churn_prediction": churn,
+            "at_risk": risk,
+            "growth_signals": None,
+        },
+        "meta": {
+            "csv1_rows": len(mrr_df),
+            "csv1_columns": list(mrr_df.columns[:20]),
+            "csv2_rows": len(orgs_df) if orgs_df is not None else 0,
+            "csv2_columns": list(orgs_df.columns[:20]) if orgs_df is not None else [],
+            "source": "retool_webhook",
+        },
+    }
+
+
+@app.route("/api/fetch-data", methods=["POST"])
+def fetch_data():
+    """Fetch live data from Retool Workflow webhook and run analysis."""
+    try:
+        # 1. Try Retool Workflow webhook
+        try:
+            raw = fetch_retool_webhook("organizations")
+            rows = _extract_rows_from_retool_response(raw)
+        except Exception as e:
+            rows = []
+            webhook_error = str(e)
+        else:
+            webhook_error = None
+
+        if rows:
+            mrr_df, orgs_df, warns = build_dataframes_from_rows(rows)
+            if "org_id" not in mrr_df.columns:
+                rows = []
+            else:
+                result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
+                return jsonify(result)
+
+        # 2. Fallback: friendly "connecting" response
+        msg = "Database connecting..."
+        if webhook_error:
+            msg += f" ({webhook_error[:120]})"
+        else:
+            msg += " (Workflow returned empty data — SQL blocks need to be configured in Retool)"
+        return jsonify({"connecting": True, "message": msg})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"connecting": True, "message": f"Database connecting... ({str(e)[:120]})"})
 
 
 @app.route("/api/auto-fetch", methods=["POST"])
 def auto_fetch():
-    """Auto-fetch data from Retool and run analysis."""
-    try:
-        cfg = get_retool_config()
-        if not cfg.get("email") or not cfg.get("password"):
-            return jsonify({"error": "Retool credentials not configured. Go to Admin Settings to add email and password."}), 400
-
-        # Try to fetch data
-        try:
-            orgs_df = fetch_from_retool("organizations")
-            # Would transform and analyze here
-            return jsonify({"success": True, "message": "Auto-fetch complete"})
-        except NotImplementedError as e:
-            return jsonify({"error": str(e)}), 501
-        except Exception as e:
-            return jsonify({"error": f"Retool connection failed: {str(e)}. Please upload CSV manually."}), 503
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    """Legacy endpoint — delegates to fetch-data."""
+    return fetch_data()
 
 
 @app.route("/api/admin/retool-config", methods=["GET"])

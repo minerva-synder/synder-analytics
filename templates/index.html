@@ -130,70 +130,29 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 <nav class="navbar navbar-light px-4">
   <span class="navbar-brand">📊 Synder Analytics</span>
   <div>
-    <button class="btn btn-sm btn-outline-secondary me-2" id="btnReset" style="display:none" onclick="resetApp()">← New Analysis</button>
+    <button class="btn btn-sm btn-outline-primary me-2" id="btnRefreshTop" style="display:none" onclick="runFetchData()">🔄 Refresh</button>
+    <button class="btn btn-sm btn-outline-secondary me-2" id="btnReset" style="display:none" onclick="resetApp()">← Reset</button>
     <a href="/admin/settings" class="btn btn-sm btn-outline-secondary">⚙️ Settings</a>
   </div>
 </nav>
 
 <!-- UPLOAD SECTION -->
 <div id="upload-section" class="py-5">
-  <div class="container">
+  <div class="container" style="max-width:600px">
     <div class="text-center mb-4">
-      <h3>Upload your data</h3>
-      <p class="text-muted">Drop two CSV files to generate Retention Stats & Health Assessment dashboards</p>
+      <div style="font-size:3rem;margin-bottom:12px">🦉</div>
+      <h3>Synder Analytics</h3>
+      <p class="text-muted" id="connectingMsg">Connecting to database...</p>
     </div>
-
-    <!-- Period Selector -->
-    <div class="card mb-4" style="border:1px solid var(--border);border-radius:12px;">
-      <div class="card-body">
-        <div class="d-flex flex-wrap align-items-center gap-3">
-          <strong class="small">📅 Period:</strong>
-          <div class="btn-group btn-group-sm" role="group" id="periodPresets">
-            <button type="button" class="btn btn-outline-primary active" onclick="setPeriod('this_month')">This Month</button>
-            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_month')">Last Month</button>
-            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_3')">Last 3 Months</button>
-            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('last_6')">Last 6 Months</button>
-            <button type="button" class="btn btn-outline-primary" onclick="setPeriod('custom')">Custom</button>
-          </div>
-          <div class="d-flex align-items-center gap-2" id="customDateRange" style="display:none !important">
-            <input type="date" class="form-control form-control-sm" id="periodStart" style="width:150px">
-            <span>—</span>
-            <input type="date" class="form-control form-control-sm" id="periodEnd" style="width:150px">
-          </div>
-          <span class="text-muted small" id="periodLabel"></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="row g-4 mb-4">
-      <div class="col-md-6">
-        <div class="upload-zone" id="zone1" onclick="document.getElementById('file1').click()">
-          <div class="icon">📄</div>
-          <h5>CSV #1 — MRR Data</h5>
-          <p class="text-muted small">MRR per day, org names & IDs, plan info</p>
-          <div class="file-name" id="file1name"></div>
-          <input type="file" id="file1" accept=".csv" style="display:none" onchange="handleFile(1, this)">
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div class="upload-zone" id="zone2" onclick="document.getElementById('file2').click()">
-          <div class="icon">📄</div>
-          <h5>CSV #2 — Paid Orgs Export</h5>
-          <p class="text-muted small">Plan, syncs, cancellation dates, intervals</p>
-          <div class="file-name" id="file2name"></div>
-          <input type="file" id="file2" accept=".csv" style="display:none" onchange="handleFile(2, this)">
-        </div>
-      </div>
-    </div>
-
     <div class="text-center">
-      <button class="btn btn-primary btn-lg px-5 me-2" id="btnAnalyze" onclick="runAnalysis()" disabled>
-        🚀 Run Analysis
+      <div class="spinner-border text-primary mb-3" id="connectingSpinner"></div>
+      <div id="connectingError" style="display:none" class="alert alert-warning">
+        <strong>⏳ Database connecting...</strong>
+        <p class="mb-0 small mt-1" id="connectingDetail"></p>
+      </div>
+      <button class="btn btn-primary btn-lg px-5 mt-3" id="btnRefresh" onclick="runFetchData()" style="display:none">
+        🔄 Refresh Data
       </button>
-      <button class="btn btn-outline-primary btn-lg px-4" id="btnAutoFetch" onclick="runAutoFetch()">
-        🔄 Auto-fetch from Retool
-      </button>
-      <p class="text-muted small mt-2">CSV #1 is required. CSV #2 enables health assessment features. Or try auto-fetch from Retool DB.</p>
     </div>
   </div>
 </div>
@@ -359,7 +318,6 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 // ---- State ----
-let file1 = null, file2 = null;
 let analysisResult = null;
 let nrrBreakdownData = [], expansionData = [], churnData = [], atRiskData = [], growthData = [];
 let subMigrationExcludes = new Set(); // org_ids excluded via sub migration
@@ -371,64 +329,66 @@ let tableSortState = {};
 let detailsStore = {};
 let detailsActiveKey = null;
 
-// ---- Upload handling ----
-function handleFile(num, input) {
-  const f = input.files[0];
-  if (!f) return;
-  if (num === 1) { file1 = f; } else { file2 = f; }
-  const zone = document.getElementById('zone' + num);
-  const nameEl = document.getElementById('file' + num + 'name');
-  zone.classList.add('has-file');
-  nameEl.textContent = '✅ ' + f.name;
-  document.getElementById('btnAnalyze').disabled = !file1;
-}
+// ---- Fetch from Retool Webhook ----
+async function runFetchData() {
+  const btn = document.getElementById('btnRefresh');
+  const spinner = document.getElementById('connectingSpinner');
+  const errDiv = document.getElementById('connectingError');
+  const detail = document.getElementById('connectingDetail');
+  const msgEl = document.getElementById('connectingMsg');
 
-// Drag-and-drop
-document.querySelectorAll('.upload-zone').forEach((zone, idx) => {
-  const num = idx + 1;
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-  zone.addEventListener('drop', e => {
-    e.preventDefault(); zone.classList.remove('dragover');
-    const f = e.dataTransfer.files[0];
-    if (f) {
-      const input = document.getElementById('file' + num);
-      const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
-      handleFile(num, input);
-    }
-  });
-});
-
-// ---- Run Analysis ----
-async function runAnalysis() {
-  if (!file1) return;
-  showLoading('Analyzing data...');
-  const fd = new FormData();
-  fd.append('csv1', file1);
-  if (file2) fd.append('csv2', file2);
-  if (selectedPeriod.start) fd.append('period_start', selectedPeriod.start);
-  if (selectedPeriod.end) fd.append('period_end', selectedPeriod.end);
+  if (btn) btn.style.display = 'none';
+  if (spinner) spinner.style.display = '';
+  if (errDiv) errDiv.style.display = 'none';
+  if (msgEl) msgEl.textContent = 'Connecting to database...';
 
   try {
-    const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
+    const resp = await fetch('/api/fetch-data', { method: 'POST' });
     const data = await resp.json();
-    if (data.error) { alert('Error: ' + data.error); hideLoading(); return; }
+
+    if (data.connecting) {
+      // Workflow not ready yet — show friendly message
+      if (spinner) spinner.style.display = 'none';
+      if (errDiv) { errDiv.style.display = ''; }
+      if (detail) detail.textContent = data.message || '';
+      if (btn) btn.style.display = '';
+      if (msgEl) msgEl.textContent = 'Database not yet connected.';
+      return;
+    }
+
+    if (data.error) {
+      if (spinner) spinner.style.display = 'none';
+      if (errDiv) errDiv.style.display = '';
+      if (detail) detail.textContent = data.error;
+      if (btn) btn.style.display = '';
+      return;
+    }
+
     analysisResult = data;
     renderResults(data);
     document.getElementById('upload-section').style.display = 'none';
     document.getElementById('results').style.display = 'block';
-    document.getElementById('btnReset').style.display = 'inline-block';
+    const resetBtn = document.getElementById('btnReset');
+    if (resetBtn) resetBtn.style.display = 'inline-block';
+    const refreshTop = document.getElementById('btnRefreshTop');
+    if (refreshTop) refreshTop.style.display = 'inline-block';
+
   } catch (e) {
-    alert('Error: ' + e.message);
+    if (spinner) spinner.style.display = 'none';
+    if (errDiv) errDiv.style.display = '';
+    if (detail) detail.textContent = e.message;
+    if (btn) btn.style.display = '';
   }
-  hideLoading();
 }
 
 function resetApp() {
   document.getElementById('upload-section').style.display = 'block';
   document.getElementById('results').style.display = 'none';
-  document.getElementById('btnReset').style.display = 'none';
+  const resetBtn = document.getElementById('btnReset');
+  if (resetBtn) resetBtn.style.display = 'none';
   analysisResult = null;
+  // Re-trigger auto-fetch on reset
+  runFetchData();
 }
 
 // ---- Render ----
@@ -553,7 +513,9 @@ function renderResults(data) {
   }
 
   // Meta
-  $('metaInfo').textContent = `CSV #1: ${data.meta.csv1_rows} rows | CSV #2: ${data.meta.csv2_rows} rows`;
+  const src = (data.meta && data.meta.source) ? data.meta.source : 'csv';
+  const srcLabel = src === 'retool_webhook' ? 'Live from Retool' : 'CSV upload';
+  $('metaInfo').textContent = `${srcLabel}: ${data.meta.csv1_rows} orgs | ${data.meta.csv2_rows} with health data`;
 
   const d1 = data.dashboard1;
   const d2 = data.dashboard2;
@@ -851,22 +813,39 @@ async function fetchJsonWithRetry(url, opts, retries=2) {
 }
 
 async function runGrowthSignals() {
-  if (!file1) return;
+  if (!analysisResult) return;
   $('btnGrowth').disabled = true;
   $('btnGrowth').textContent = '⏳ Researching...';
   $('growthProgress').style.display = 'block';
   $('growthBar').style.width = '0%';
   $('growthStatus').textContent = 'Starting web research job...';
 
-  const fd = new FormData();
-  fd.append('csv1', file1);
+  // Build org_names list from cached analysis result
+  const orgNames = [];
+  const d1 = analysisResult.dashboard1 || {};
+  const sources = [
+    (d1.expansion || {}).all_expanders,
+    (d1.retention || {}).new_mrr_accounts,
+    (d1.nrr || {}).cohort_accounts,
+  ];
+  const seen = new Set();
+  sources.forEach(arr => {
+    (arr || []).forEach(r => {
+      const n = (r.org_name || '').trim();
+      if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); orgNames.push(n); }
+    });
+  });
 
   try {
     const scope = $('growthScope') ? $('growthScope').value : 'hm_essential';
     const maxOrgs = $('growthMax') ? Math.min(500, Math.max(10, parseInt($('growthMax').value || '300', 10))) : 300;
 
     const startUrl = `/api/growth-start?max_orgs=${encodeURIComponent(maxOrgs)}&segment=${encodeURIComponent(scope)}`;
-    const startData = await fetchJsonWithRetry(startUrl, { method: 'POST', body: fd }, 3);
+    const startData = await fetchJsonWithRetry(startUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({org_names: orgNames.slice(0, maxOrgs)})
+    }, 3);
     if (startData.error) throw new Error(startData.error);
 
     const jobId = startData.job_id;
@@ -1373,24 +1352,10 @@ function updatePeriodLabel() {
   if ($('periodEnd')) $('periodEnd').addEventListener('change', updatePeriodLabel);
 })();
 
-// ---- Auto-fetch from Retool ----
-async function runAutoFetch() {
-  $('btnAutoFetch').disabled = true;
-  $('btnAutoFetch').textContent = '⏳ Connecting to Retool...';
-  try {
-    const resp = await fetch('/api/auto-fetch', { method: 'POST' });
-    const data = await resp.json();
-    if (data.error) {
-      alert('Auto-fetch: ' + data.error);
-    } else {
-      alert('Auto-fetch successful! (Implementation in progress)');
-    }
-  } catch (e) {
-    alert('Auto-fetch error: ' + e.message);
-  }
-  $('btnAutoFetch').disabled = false;
-  $('btnAutoFetch').textContent = '🔄 Auto-fetch from Retool';
-}
+// ---- Auto-fetch on page load ----
+window.addEventListener('DOMContentLoaded', () => {
+  runFetchData();
+});
 
 // ---- Loading ----
 function showLoading(msg) { $('loading').style.display = 'flex'; $('loadingText').textContent = msg; }
