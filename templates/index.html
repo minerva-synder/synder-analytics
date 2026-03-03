@@ -341,12 +341,19 @@ async function runFetchData() {
   if (spinner) spinner.style.display = '';
   if (errDiv) errDiv.style.display = 'none';
   if (msgEl) msgEl.textContent = 'Connecting to database...';
+  // Show elapsed time so user knows it's working
+  let elapsed = 0;
+  const tick = setInterval(() => {
+    elapsed++;
+    if (msgEl) msgEl.textContent = `Connecting to database... (${elapsed}s)`;
+  }, 1000);
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
-    const resp = await fetch('/api/fetch-data', { method: 'POST', signal: controller.signal });
+    const resp = await fetch('/api/fetch-data', { method: 'POST', signal: controller.signal, headers: {'Content-Type': 'application/json'}, body: '{}' });
     clearTimeout(timeout);
+    clearInterval(tick);
     const data = await resp.json();
 
     if (data.connecting) {
@@ -377,6 +384,7 @@ async function runFetchData() {
     if (refreshTop) refreshTop.style.display = 'inline-block';
 
   } catch (e) {
+    clearInterval(tick);
     if (spinner) spinner.style.display = 'none';
     if (errDiv) errDiv.style.display = '';
     const msg = e.name === 'AbortError' ? 'Request timed out (60s). The database may be slow — try refreshing.' : e.message;
