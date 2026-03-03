@@ -1087,6 +1087,44 @@ def churn_prediction(mrr, orgs):
     }
 
 
+def churn_from_mrr(mrr):
+    """Build churn data from MRR snapshots when no cancellation_date is available.
+    Churned = start_mrr > 0 and end_mrr == 0."""
+    mrr = prepare_mrr(mrr)
+    churned = mrr[(mrr["_sm"] > 0) & (mrr["_em"] == 0)].copy()
+    if churned.empty:
+        return {"total_count": 0, "total_mrr_at_risk": 0, "buckets": [], "accounts": []}
+
+    # No time-based buckets available — group all under "This period"
+    api_key = get_hubspot_api_key()
+    hs_cache = {}
+    accounts = []
+    for _, r in churned.head(200).iterrows():
+        oid = str(r.get("org_id", ""))
+        acc = {
+            "org_id": oid,
+            "org_name": r.get("org_name", ""),
+            "plan_display": r.get("_sp", ""),
+            "mrr": money(r["_sm"]),
+            "churn_date": "This period",
+            "subscription_end_date": "",
+            "bucket": "This period",
+        }
+        if api_key and oid:
+            hs = hubspot_lookup_org(oid, api_key, hs_cache)
+            acc["csm"] = hs["csm"]
+        else:
+            acc["csm"] = "N/A"
+        accounts.append(acc)
+
+    return {
+        "total_count": len(churned),
+        "total_mrr_at_risk": money(churned["_sm"].sum()),
+        "buckets": [{"bucket": "This period", "count": len(churned), "mrr_at_risk": money(churned["_sm"].sum())}],
+        "accounts": accounts,
+    }
+
+
 def at_risk_analysis(mrr, orgs):
     mrr = prepare_mrr(mrr)
     today = pd.Timestamp.now().normalize()
@@ -1921,6 +1959,19 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
         except Exception:
             pass
 
+    # Upsell potential
+    try:
+        upsell = upsell_potential(mrr_df)
+    except Exception:
+        upsell = None
+
+    # If churn_prediction returned empty (no cancellation dates), build from MRR churned orgs
+    if (churn is None or churn.get("total_count", 0) == 0) and not mrr_df.empty:
+        try:
+            churn = churn_from_mrr(mrr_df)
+        except Exception:
+            pass
+
     return {
         "success": True,
         "warnings": warns,
@@ -1931,6 +1982,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
             "cohort_heatmap": None,
             "retention": ret,
             "cohort_data": cohort_data,
+            "upsell_potential": upsell,
         },
         "dashboard2": {
             "churn_prediction": churn,
@@ -2135,6 +2187,140 @@ def recalc_nrr():
             "logo_retention_pct": logo_retention,
         })
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def upsell_potential(mrr):
+    """Find Essential orgs likely to benefit from Pro upgrade."""
+    mrr = prepare_mrr(mrr)
+    essential = mrr[mrr["_ep"] == "ESSENTIAL"].copy()
+    if essential.empty:
+        return {"candidates": [], "total": 0, "total_mrr": "$0.00", "avg_score": 0}
+
+    # Tenure from first_paid_date
+    if "first_paid_date" in essential.columns:
+        essential["_tenure_days"] = (pd.Timestamp.now() - pd.to_datetime(essential["first_paid_date"], errors="coerce")).dt.days
+    else:
+        essential["_tenure_days"] = 0
+
+    essential["_score"] = 0
+
+    # High MRR for Essential (above median)
+    median_mrr = essential["_em"].median()
+    if median_mrr > 0:
+        essential.loc[essential["_em"] > median_mrr, "_score"] += 2
+
+    # Long tenure (>180 days)
+    essential.loc[essential["_tenure_days"] > 180, "_score"] += 2
+
+    # Very long tenure (>365 days)
+    essential.loc[essential["_tenure_days"] > 365, "_score"] += 1
+
+    # MRR growth
+    essential.loc[essential["_em"] > essential["_sm"], "_score"] += 1
+
+    candidates = essential[essential["_score"] >= 2].sort_values("_score", ascending=False)
+
+    # Build accounts list
+    accts = []
+    for _, r in candidates.head(100).iterrows():
+        oid = r.get("org_id", "")
+        accts.append({
+            "org_id": str(oid) if oid else "",
+            "synder_url": synder_org_url(oid),
+            "org_name": r.get("org_name", ""),
+            "end_plan": "ESSENTIAL",
+            "start_mrr": money(r.get("_sm", 0)),
+            "end_mrr": money(r.get("_em", 0)),
+            "tenure_days": int(r.get("_tenure_days", 0)) if pd.notna(r.get("_tenure_days", 0)) else 0,
+            "score": int(r.get("_score", 0)),
+            "industry": r.get("industry", ""),
+        })
+
+    return {
+        "total": len(candidates),
+        "total_mrr": money(candidates["_em"].sum()),
+        "avg_score": float(round(candidates["_score"].mean(), 1)) if len(candidates) > 0 else 0,
+        "candidates": accts,
+    }
+
+
+@app.route("/api/monthly-cohort", methods=["GET"])
+def monthly_cohort():
+    """12-month retention cohort for Pro/Premium orgs using parameterized Retool workflow calls."""
+    try:
+        today = date.today().replace(day=1)  # 1st of current month
+        months = []
+        for i in range(12, 0, -1):
+            # Start = 1st of month (i months ago)
+            m_start = (today - timedelta(days=i * 30)).replace(day=1)
+            # End = 1st of next month
+            if m_start.month == 12:
+                m_end = m_start.replace(year=m_start.year + 1, month=1)
+            else:
+                m_end = m_start.replace(month=m_start.month + 1)
+            months.append((m_start, m_end))
+
+        cohort_rows = []
+        for m_start, m_end in months:
+            try:
+                raw = fetch_retool_webhook("organizations", payload={
+                    "start_date": m_start.isoformat(),
+                    "end_date": m_end.isoformat(),
+                })
+                rows = _extract_rows_from_retool_response(raw)
+                df = pd.DataFrame(rows) if rows else pd.DataFrame()
+            except Exception:
+                df = pd.DataFrame()
+
+            if df.empty or "start_mrr" not in df.columns:
+                cohort_rows.append({
+                    "month": m_start.strftime("%Y-%m"),
+                    "start_orgs": 0, "end_orgs": 0, "churned": 0,
+                    "logo_retention_pct": None,
+                    "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
+                })
+                continue
+
+            df["_sm"] = pd.to_numeric(df.get("start_mrr", 0), errors="coerce").fillna(0)
+            df["_em"] = pd.to_numeric(df.get("end_mrr", 0), errors="coerce").fillna(0)
+            df["_sp"] = df.get("start_plan", "").apply(norm_plan)
+            df["_ep"] = df.get("end_plan", "").apply(norm_plan)
+
+            # Filter to Pro/Premium only
+            pro_prem = NRR_PLANS  # HIGH_TOUCH | MEDIUM_TOUCH
+            cohort = df[(df["_sp"].isin(pro_prem)) & (df["_sm"] > 0)].copy()
+
+            if cohort.empty:
+                cohort_rows.append({
+                    "month": m_start.strftime("%Y-%m"),
+                    "start_orgs": 0, "end_orgs": 0, "churned": 0,
+                    "logo_retention_pct": None,
+                    "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
+                })
+                continue
+
+            start_count = len(cohort)
+            churned = cohort[(cohort["_em"] == 0) | cohort["_ep"].isna()]
+            churned_count = len(churned)
+            end_count = start_count - churned_count
+            s_mrr = cohort["_sm"].sum()
+            e_mrr = cohort[~((cohort["_em"] == 0) | cohort["_ep"].isna())]["_em"].sum()
+
+            cohort_rows.append({
+                "month": m_start.strftime("%Y-%m"),
+                "start_orgs": start_count,
+                "end_orgs": end_count,
+                "churned": churned_count,
+                "logo_retention_pct": round(end_count / start_count * 100, 1) if start_count else None,
+                "start_mrr": money(s_mrr),
+                "end_mrr": money(e_mrr),
+                "nrr_pct": round(e_mrr / s_mrr * 100, 1) if s_mrr else None,
+            })
+
+        return jsonify({"success": True, "cohorts": cohort_rows})
+    except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 

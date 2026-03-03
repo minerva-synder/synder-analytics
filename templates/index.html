@@ -318,6 +318,18 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div id="atRiskSummary" class="mb-3"></div>
         <div class="table-wrapper" id="atRiskTable"></div>
 
+        <!-- 2b. Upsell Potential -->
+        <div class="section-title">📈 Upsell Potential — Essential → Pro Candidates</div>
+        <div class="row g-3 mb-3" id="upsellCards"></div>
+        <div class="table-wrapper" id="upsellTable"></div>
+
+        <!-- 2c. Monthly Retention Cohort (Pro/Premium) -->
+        <div class="section-title">📊 12-Month Retention Cohort (Pro/Premium)
+          <button class="btn btn-sm btn-outline-primary ms-2" id="btnMonthlyCohort" onclick="loadMonthlyCohort()">Load</button>
+        </div>
+        <div id="monthlyCohortNote" class="text-muted small mb-2">Click "Load" to fetch 12 months of retention data (makes multiple API calls — may take 30-60 seconds).</div>
+        <div class="table-wrapper" id="monthlyCohortTable"></div>
+
         <!-- 3. Growth Signals -->
         <div class="section-title">3. Business Growth Signals
           <button class="btn btn-outline-secondary export-btn float-end" onclick="exportCSV('growth_signals', growthData)">⬇ Export CSV</button>
@@ -586,7 +598,8 @@ function renderResults(data) {
   // Meta
   const src = (data.meta && data.meta.source) ? data.meta.source : 'csv';
   const srcLabel = src === 'retool_webhook' ? 'Live from Retool' : 'CSV upload';
-  $('metaInfo').textContent = `${srcLabel}: ${data.meta.csv1_rows} orgs | ${data.meta.csv2_rows} with health data`;
+  const dateNote = src === 'retool_webhook' ? ` | Date range: data snapshots from Retool workflow` : '';
+  $('metaInfo').textContent = `${srcLabel}: ${data.meta.csv1_rows} orgs | ${data.meta.csv2_rows} with health data${dateNote}`;
 
   const d1 = data.dashboard1;
   const d2 = data.dashboard2;
@@ -603,6 +616,7 @@ function renderResults(data) {
   // ---- Dashboard 2 ----
   try { if (d2.churn_prediction) renderChurn(d2.churn_prediction); } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
   try { if (d2.at_risk) renderAtRisk(d2.at_risk); } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
+  try { if (d1.upsell_potential) renderUpsell(d1.upsell_potential); } catch(e) { console.error('[Minerva] renderUpsell failed:', e); }
 }
 
 function renderSandbox(sb) {
@@ -959,6 +973,63 @@ async function fetchJsonWithRetry(url, opts, retries=2) {
     throw new Error(`Server returned non-JSON (HTTP ${resp.status}). ${snippet}`);
   }
   throw new Error(lastText ? lastText.slice(0, 220) : 'Unknown error');
+}
+
+function renderUpsell(up) {
+  if (!up || !up.total) {
+    $('upsellCards').innerHTML = '<p class="text-muted small">No upsell candidates found.</p>';
+    return;
+  }
+  setDetails('upsell_all', 'Upsell candidates (Essential → Pro)', up.candidates || []);
+  $('upsellCards').innerHTML =
+    metricCard('Candidates', num(up.total), 'score ≥ 2', 'blue', 'upsell_all') +
+    metricCard('Combined MRR', fmt(up.total_mrr), 'current Essential MRR', 'green') +
+    metricCard('Avg Score', up.avg_score, 'out of 6', 'blue');
+
+  if (up.candidates && up.candidates.length) {
+    $('upsellTable').innerHTML = renderTable(up.candidates, [
+      {key:'org_id', label:'Org ID'},
+      {key:'org_name', label:'Organization'},
+      {key:'end_mrr', label:'MRR', fmt: fmt},
+      {key:'tenure_days', label:'Tenure (days)'},
+      {key:'score', label:'Score'},
+      {key:'industry', label:'Industry'},
+    ], { tableId: 'tbl_upsell', sortable: true });
+  }
+}
+
+async function loadMonthlyCohort() {
+  const btn = $('btnMonthlyCohort');
+  btn.disabled = true;
+  btn.textContent = '⏳ Loading...';
+  $('monthlyCohortNote').textContent = 'Fetching 12 months of data from Retool...';
+  try {
+    const resp = await fetch('/api/monthly-cohort');
+    const data = await resp.json();
+    if (data.error) {
+      $('monthlyCohortNote').textContent = 'Error: ' + data.error;
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+      return;
+    }
+    $('monthlyCohortNote').textContent = 'Pro/Premium logo & revenue retention by month.';
+    const rows = data.cohorts || [];
+    $('monthlyCohortTable').innerHTML = renderTable(rows, [
+      {key:'month', label:'Month'},
+      {key:'start_orgs', label:'Start Orgs'},
+      {key:'end_orgs', label:'End Orgs'},
+      {key:'churned', label:'Churned'},
+      {key:'logo_retention_pct', label:'Logo Retention %', fmt: v => v != null ? v + '%' : '—'},
+      {key:'start_mrr', label:'Start MRR', fmt: fmt},
+      {key:'end_mrr', label:'End MRR', fmt: fmt},
+      {key:'nrr_pct', label:'NRR %', fmt: v => v != null ? v + '%' : '—'},
+    ], { tableId: 'tbl_monthly_cohort', sortable: true });
+    btn.textContent = '✅ Loaded';
+  } catch(e) {
+    $('monthlyCohortNote').textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
 }
 
 async function runGrowthSignals() {
