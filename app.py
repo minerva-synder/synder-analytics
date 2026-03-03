@@ -1728,14 +1728,17 @@ def build_dataframes_from_rows(rows):
     mrr_map_live = {
         "org_id": ["org_id", "organization_id", "id"],
         "org_name": ["org_name", "organization_name", "name"],
-        "end_plan": ["plans", "plan_name", "plan", "current_plan"],
-        "end_mrr": ["mrr", "sub_amount", "amount", "mrr_current"],
+        "start_plan": ["start_plan", "plans", "plan_name", "plan", "current_plan"],
+        "end_plan": ["end_plan", "plans", "plan_name", "plan", "current_plan"],
+        "start_mrr": ["start_mrr", "mrr", "sub_amount", "amount", "mrr_current"],
+        "end_mrr": ["end_mrr", "mrr", "sub_amount", "amount", "mrr_current"],
+        "org_link": ["org_link", "synder_link"],
     }
     mrr_df, mrr_warns = map_cols(df, mrr_map_live)
-    # For live point-in-time data, start = end (single snapshot)
-    if "end_plan" in mrr_df.columns:
+    # If only single snapshot (no start columns), fall back to end = start
+    if "end_plan" in mrr_df.columns and "start_plan" not in mrr_df.columns:
         mrr_df["start_plan"] = mrr_df["end_plan"]
-    if "end_mrr" in mrr_df.columns:
+    if "end_mrr" in mrr_df.columns and "start_mrr" not in mrr_df.columns:
         mrr_df["start_mrr"] = mrr_df["end_mrr"]
     if "org_id" in mrr_df.columns:
         mrr_df["org_id"] = mrr_df["org_id"].astype(str).str.strip()
