@@ -167,14 +167,24 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 <div id="results" class="pb-5">
   <div class="container-fluid px-4">
 
-    <!-- Warnings -->
-    <div id="warningsBox" class="warnings-box" style="display:none">
-      <strong>⚠️ Warnings</strong>
-      <ul id="warningsList"></ul>
-    </div>
-
     <!-- Meta -->
-    <div class="text-muted small mb-3" id="metaInfo"></div>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="text-muted small" id="metaInfo"></div>
+      <div class="d-flex align-items-center gap-2">
+        <span class="text-muted small" id="periodLabel">Loading...</span>
+        <input type="date" class="form-control form-control-sm" id="periodStart" style="width:140px">
+        <span class="text-muted small">to</span>
+        <input type="date" class="form-control form-control-sm" id="periodEnd" style="width:140px">
+        <button class="btn btn-sm btn-outline-primary" onclick="refetchWithPeriod()">Apply</button>
+        <select class="form-select form-select-sm" style="width:auto" onchange="setPeriodPreset(this.value)">
+          <option value="last_30d" selected>Last 30 days</option>
+          <option value="this_month">This month</option>
+          <option value="last_month">Last month</option>
+          <option value="last_90d">Last 90 days</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+    </div>
 
     <!-- Dashboard Tabs -->
     <ul class="nav nav-tabs mb-4" id="dashTabs">
@@ -352,7 +362,8 @@ async function runFetchData() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     console.log('[Minerva] Starting fetch /api/fetch-data...');
-    const resp = await fetch('/api/fetch-data', { signal: controller.signal });
+    const qs = selectedPeriod ? `?start=${selectedPeriod.start}&end=${selectedPeriod.end}` : '';
+    const resp = await fetch('/api/fetch-data' + qs, { signal: controller.signal });
     console.log('[Minerva] Response received:', resp.status, resp.statusText);
     clearTimeout(timeout);
     clearInterval(tick);
@@ -525,11 +536,7 @@ function renderResults(data) {
   detailsStore = {};
   detailsActiveKey = null;
 
-  // Warnings
-  if (data.warnings && data.warnings.length) {
-    $('warningsBox').style.display = 'block';
-    $('warningsList').innerHTML = data.warnings.map(w => `<li class="small">${w}</li>`).join('');
-  }
+  // Warnings suppressed — data comes from live DB now
 
   // Meta
   const src = (data.meta && data.meta.source) ? data.meta.source : 'csv';
@@ -1357,21 +1364,81 @@ function updatePeriodLabel() {
   }
 }
 
-// Initialize period to current month
-(function() {
+function setPeriodPreset(preset) {
   const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
   const fmt_d = d => d.toISOString().slice(0, 10);
-  selectedPeriod = { start: fmt_d(start), end: fmt_d(end), preset: 'this_month' };
+  let start, end;
+  if (preset === 'last_30d') {
+    end = new Date(now); start = new Date(now); start.setDate(start.getDate() - 30);
+  } else if (preset === 'this_month') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else if (preset === 'last_month') {
+    start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth(), 0);
+  } else if (preset === 'last_90d') {
+    end = new Date(now); start = new Date(now); start.setDate(start.getDate() - 90);
+  } else {
+    preset = 'custom';
+  }
+  if (preset !== 'custom') {
+    selectedPeriod = { start: fmt_d(start), end: fmt_d(end), preset };
+    if ($('periodStart')) $('periodStart').value = selectedPeriod.start;
+    if ($('periodEnd')) $('periodEnd').value = selectedPeriod.end;
+    updatePeriodLabel();
+  }
+  // Update dropdown to match
+  const sel = document.querySelector('select[onchange]');
+  if (sel) sel.value = preset;
+}
+
+function refetchWithPeriod() {
+  const s = $('periodStart') ? $('periodStart').value : null;
+  const e = $('periodEnd') ? $('periodEnd').value : null;
+  if (s && e) { selectedPeriod = { start: s, end: e, preset: 'custom' }; updatePeriodLabel(); }
+  runFetchData();
+}
+
+// Initialize
+(function() { setPeriodPreset('last_30d'); })();
+
+function setPeriodPreset(preset) {
+  const now = new Date();
+  const fmt_d = d => d.toISOString().slice(0, 10);
+  let start, end;
+  if (preset === 'last_30d') {
+    end = now;
+    start = new Date(now); start.setDate(start.getDate() - 30);
+  } else if (preset === 'this_month') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else if (preset === 'last_month') {
+    start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth(), 0);
+  } else if (preset === 'last_90d') {
+    end = now;
+    start = new Date(now); start.setDate(start.getDate() - 90);
+  } else {
+    // custom — don't change dates
+    selectedPeriod.preset = 'custom';
+    updatePeriodLabel();
+    return;
+  }
+  selectedPeriod = { start: fmt_d(start), end: fmt_d(end), preset };
   if ($('periodStart')) $('periodStart').value = selectedPeriod.start;
   if ($('periodEnd')) $('periodEnd').value = selectedPeriod.end;
   updatePeriodLabel();
+}
 
-  // Listen for custom date changes
-  if ($('periodStart')) $('periodStart').addEventListener('change', updatePeriodLabel);
-  if ($('periodEnd')) $('periodEnd').addEventListener('change', updatePeriodLabel);
-})();
+function refetchWithPeriod() {
+  const s = $('periodStart').value;
+  const e = $('periodEnd').value;
+  if (!s || !e) return;
+  selectedPeriod.start = s;
+  selectedPeriod.end = e;
+  updatePeriodLabel();
+  runFetchData();
+}
 
 // ---- Auto-fetch on page load ----
 window.addEventListener('DOMContentLoaded', () => {
