@@ -1798,6 +1798,51 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
+def _trim_response(result, max_accounts=50):
+    """Trim large account lists to keep JSON response small."""
+    def trim_list(obj, key):
+        if isinstance(obj, dict) and key in obj and isinstance(obj[key], list):
+            full = obj[key]
+            if len(full) > max_accounts:
+                obj[key] = full[:max_accounts]
+                obj[f"{key}_total"] = len(full)
+                obj[f"{key}_truncated"] = True
+
+    d1 = result.get("dashboard1", {})
+    d2 = result.get("dashboard2", {})
+
+    # NRR
+    nrr = d1.get("nrr", {})
+    trim_list(nrr, "cohort_accounts")
+    trim_list(nrr, "churned_accounts")
+    trim_list(nrr, "expansion_accounts")
+    trim_list(nrr, "contraction_accounts")
+
+    # Expansion
+    exp = d1.get("expansion", {})
+    trim_list(exp, "all_expanders")
+    trim_list(exp, "new_mrr_accounts")
+    trim_list(exp, "top_expanders")
+
+    # Retention
+    ret = d1.get("retention", {})
+    for k in ["expansion_mrr_accounts", "new_mrr_accounts", "churned_accounts",
+              "downgraded_accounts", "upgraded_accounts", "unsubscribed_accounts"]:
+        trim_list(ret, k)
+
+    # Sandbox
+    sb = d1.get("sandbox_cohort", {})
+    for section in ["A_cohort", "B_churn_downgrade", "C_moved_to_pro", "D_new_mrr", "E_upgrades_expansion"]:
+        s = sb.get(section, {})
+        for k in list(s.keys()):
+            if isinstance(s.get(k), list) and "account" in k:
+                trim_list(s, k)
+
+    # At-risk
+    ar = d2.get("at_risk", {})
+    trim_list(ar, "accounts")
+
+
 @app.route("/api/fetch-data", methods=["POST"])
 def fetch_data():
     """Fetch live data from Retool Workflow webhook and run analysis."""
@@ -1818,6 +1863,8 @@ def fetch_data():
                 rows = []
             else:
                 result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
+                # Trim large account lists to keep response under 100KB
+                _trim_response(result)
                 return jsonify(result)
 
         # 2. Fallback: friendly "connecting" response
