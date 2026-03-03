@@ -343,7 +343,10 @@ async function runFetchData() {
   if (msgEl) msgEl.textContent = 'Connecting to database...';
 
   try {
-    const resp = await fetch('/api/fetch-data', { method: 'POST' });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    const resp = await fetch('/api/fetch-data', { method: 'POST', signal: controller.signal });
+    clearTimeout(timeout);
     const data = await resp.json();
 
     if (data.connecting) {
@@ -376,8 +379,10 @@ async function runFetchData() {
   } catch (e) {
     if (spinner) spinner.style.display = 'none';
     if (errDiv) errDiv.style.display = '';
-    if (detail) detail.textContent = e.message;
+    const msg = e.name === 'AbortError' ? 'Request timed out (60s). The database may be slow — try refreshing.' : e.message;
+    if (detail) detail.textContent = msg;
     if (btn) btn.style.display = '';
+    if (msgEl) msgEl.textContent = 'Could not connect.';
   }
 }
 
