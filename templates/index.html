@@ -351,10 +351,14 @@ async function runFetchData() {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
+    console.log('[Minerva] Starting fetch /api/fetch-data...');
     const resp = await fetch('/api/fetch-data', { method: 'POST', signal: controller.signal, headers: {'Content-Type': 'application/json'}, body: '{}' });
+    console.log('[Minerva] Response received:', resp.status, resp.statusText);
     clearTimeout(timeout);
     clearInterval(tick);
+    if (msgEl) msgEl.textContent = 'Parsing response...';
     const data = await resp.json();
+    console.log('[Minerva] Data parsed, success:', data.success, 'connecting:', data.connecting, 'error:', data.error);
 
     if (data.connecting) {
       // Workflow not ready yet — show friendly message
@@ -375,7 +379,9 @@ async function runFetchData() {
     }
 
     analysisResult = data;
-    renderResults(data);
+    console.log('[Minerva] Rendering results...');
+    try { renderResults(data); } catch(renderErr) { console.error('[Minerva] renderResults crashed:', renderErr); throw renderErr; }
+    console.log('[Minerva] Render complete!');
     document.getElementById('upload-section').style.display = 'none';
     document.getElementById('results').style.display = 'block';
     const resetBtn = document.getElementById('btnReset');

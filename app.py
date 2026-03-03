@@ -1361,6 +1361,10 @@ def admin_settings():
                            saved=saved)
 
 
+@app.route("/api/ping")
+def ping():
+    return jsonify({"ok": True, "ts": pd.Timestamp.now().isoformat()})
+
 @app.route("/")
 def index():
     return render_template("index.html")
