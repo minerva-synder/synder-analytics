@@ -352,7 +352,7 @@ async function runFetchData() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     console.log('[Minerva] Starting fetch /api/fetch-data...');
-    const resp = await fetch('/api/fetch-data', { method: 'POST', signal: controller.signal, headers: {'Content-Type': 'application/json'}, body: '{}' });
+    const resp = await fetch('/api/fetch-data', { signal: controller.signal });
     console.log('[Minerva] Response received:', resp.status, resp.statusText);
     clearTimeout(timeout);
     clearInterval(tick);

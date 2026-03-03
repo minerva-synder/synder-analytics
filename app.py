@@ -1843,7 +1843,7 @@ def _trim_response(result, max_accounts=50):
     trim_list(ar, "accounts")
 
 
-@app.route("/api/fetch-data", methods=["POST"])
+@app.route("/api/fetch-data", methods=["GET", "POST"])
 def fetch_data():
     """Fetch live data from Retool Workflow webhook and run analysis."""
     try:
