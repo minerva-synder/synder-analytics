@@ -1400,7 +1400,12 @@ function refetchWithPeriod() {
 }
 
 // Initialize
-(function() { setPeriodPreset('last_30d'); })();
+(function() {
+  setPeriodPreset('last_30d');
+  // Auto-refresh when dropdown changes
+  const sel = document.querySelector('select[onchange^="setPeriodPreset"]');
+  if (sel) sel.addEventListener('change', () => { setTimeout(runFetchData, 100); });
+})();
 
 function setPeriodPreset(preset) {
   const now = new Date();

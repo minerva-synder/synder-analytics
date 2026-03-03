@@ -1706,11 +1706,14 @@ def _extract_rows_from_retool_response(raw):
     return []
 
 
-def fetch_retool_webhook(query_name="organizations"):
+def fetch_retool_webhook(query_name="organizations", payload=None):
     """POST to Retool Workflow webhook and return raw JSON response."""
+    body = {"query_name": query_name}
+    if payload:
+        body.update(payload)
     resp = _requests_lib.post(
         RETOOL_WORKFLOW_URL,
-        json={"query_name": query_name},
+        json=body,
         headers={"X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY},
         timeout=60,
     )
@@ -1847,9 +1850,16 @@ def _trim_response(result, max_accounts=50):
 def fetch_data():
     """Fetch live data from Retool Workflow webhook and run analysis."""
     try:
+        # Read date range from query params
+        start_date = request.args.get("start") or request.json.get("start") if request.is_json else request.args.get("start")
+        end_date = request.args.get("end") or request.json.get("end") if request.is_json else request.args.get("end")
+        payload = {}
+        if start_date: payload["start_date"] = start_date
+        if end_date: payload["end_date"] = end_date
+
         # 1. Try Retool Workflow webhook
         try:
-            raw = fetch_retool_webhook("organizations")
+            raw = fetch_retool_webhook("organizations", payload=payload or None)
             rows = _extract_rows_from_retool_response(raw)
         except Exception as e:
             rows = []
