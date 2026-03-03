@@ -66,6 +66,11 @@ def admin_required(f):
 # ---------------------------------------------------------------------------
 # HubSpot integration
 # ---------------------------------------------------------------------------
+# CSM names are sourced from HubSpot Company owner (hubspot_owner_id property).
+# Requires a HubSpot API key (private app token) stored via the Settings page.
+# Without a key, csm_name shows as "N/A" in all org tables.
+# TODO for sync volume: add OrganizationSyncInfoForTheLast30DaysAtDate to the
+# Retool workflow SQL so total_syncs is populated in the org health export.
 
 def hubspot_search_company_by_org_id(org_id, api_key):
     """Search HubSpot for a company by synder_organization_id property."""

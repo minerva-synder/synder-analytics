@@ -593,16 +593,16 @@ function renderResults(data) {
 
   // ---- Dashboard 1 ----
   subMigrationExcludes = new Set();
-  if (d1.retention) renderRetention(d1.retention);
-  renderSandbox(d1.sandbox_cohort);
-  renderNRR(d1.nrr);
-  renderExpansion(d1.expansion);
-  renderCohortHeatmap(d1.cohort_heatmap || null);
-  if (d1.cohort_data) renderCohortData(d1.cohort_data);
+  try { if (d1.retention) renderRetention(d1.retention); } catch(e) { console.error('[Minerva] renderRetention failed:', e); }
+  try { renderSandbox(d1.sandbox_cohort); } catch(e) { console.error('[Minerva] renderSandbox failed:', e); }
+  try { renderNRR(d1.nrr); } catch(e) { console.error('[Minerva] renderNRR failed:', e); }
+  try { renderExpansion(d1.expansion); } catch(e) { console.error('[Minerva] renderExpansion failed:', e); }
+  try { renderCohortHeatmap(d1.cohort_heatmap || null); } catch(e) { console.error('[Minerva] renderCohortHeatmap failed:', e); }
+  try { if (d1.cohort_data) renderCohortData(d1.cohort_data); } catch(e) { console.error('[Minerva] renderCohortData failed:', e); }
 
   // ---- Dashboard 2 ----
-  if (d2.churn_prediction) renderChurn(d2.churn_prediction);
-  if (d2.at_risk) renderAtRisk(d2.at_risk);
+  try { if (d2.churn_prediction) renderChurn(d2.churn_prediction); } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
+  try { if (d2.at_risk) renderAtRisk(d2.at_risk); } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
 }
 
 function renderSandbox(sb) {
@@ -906,6 +906,12 @@ function renderAtRisk(ar) {
     $('atRiskSummary').innerHTML += `<div class="warnings-box mt-2"><ul>${ar.warnings.map(w=>`<li class="small">${w}</li>`).join('')}</ul></div>`;
   }
 
+  // Check if sync data is available (all zeros = not connected)
+  const hasSyncData = (ar.accounts || []).some(a => a.sync_volume_total && a.sync_volume_total > 0);
+  if (!hasSyncData && ar.accounts && ar.accounts.length > 0) {
+    $('atRiskSummary').innerHTML += `<div class="alert alert-info mt-2 small py-1">ℹ️ Sync data not yet connected — Total Syncs column shows 0. <em>TODO: add OrganizationSyncInfoForTheLast30DaysAtDate to Retool workflow.</em></div>`;
+  }
+
   atRiskData = ar.accounts;
   $('atRiskTable').innerHTML = renderTable(ar.accounts, [
     {key:'tier', label:'Tier'},
@@ -922,7 +928,7 @@ function renderAtRisk(ar) {
     {key:'failure_ratio', label:'Failure %', fmt: v => v != null ? (v*100).toFixed(1)+'%' : '—'},
     {key:'risk_reasons', label:'Risk Reasons'},
     {key:'in_grace_window', label:'Grace?'},
-  ]);
+  ], { tableId: 'tbl_at_risk', sortable: true });
 }
 
 // ---- Growth Signals ----
