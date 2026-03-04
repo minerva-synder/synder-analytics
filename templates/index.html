@@ -285,8 +285,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div class="section-title">4. Retention by Plan Cohort</div>
         <ul class="nav nav-tabs mb-3" id="cohortTabs">
           <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#cohort-high-med">High/Med Touch</a></li>
-          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-essential">Essential</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-essential">Essential/Scale</a></li>
           <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-basic">Basic</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#cohort-sandbox">Sandbox</a></li>
         </ul>
         <div class="tab-content">
           <div class="tab-pane fade show active" id="cohort-high-med">
@@ -297,6 +298,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
           </div>
           <div class="tab-pane fade" id="cohort-basic">
             <div class="row g-3 mb-3" id="cohortBasicCards"></div>
+          </div>
+          <div class="tab-pane fade" id="cohort-sandbox">
+            <div class="row g-3 mb-3" id="cohortSandboxCards"></div>
           </div>
         </div>
       </div>
@@ -859,6 +863,7 @@ function renderCohortData(cd) {
     renderCohortCards('cohortHighMedCards', cd.cohorts.high_med, 'hm');
     renderCohortCards('cohortEssentialCards', cd.cohorts.essential, 'ess');
     renderCohortCards('cohortBasicCards', cd.cohorts.basic, 'bas');
+    if (cd.cohorts.sandbox) renderCohortCards('cohortSandboxCards', cd.cohorts.sandbox, 'sb');
   }
 }
 

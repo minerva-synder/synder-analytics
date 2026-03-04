@@ -170,9 +170,9 @@ HIGH_TOUCH = {"PREMIUM", "PREMIUM_SPLIT", "PREM_SPLIT", "PREMIUM_SPLIT_LICENSE",
 MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"}
 NRR_PLANS = HIGH_TOUCH | MEDIUM_TOUCH
 
-# Retention cohorts
-COHORT_HIGH_MED = {"PRO", "PREMIUM", "LARGE", "SCALE", "SMALL_ENTERPRISE", "PRO_SPLIT_LICENSE", "PREMIUM_SPLIT_LICENSE"}
-COHORT_ESSENTIAL = {"ESSENTIAL"}
+# Retention cohorts (SCALE is low touch per Valentina)
+COHORT_HIGH_MED = {"PRO", "PREMIUM", "LARGE", "SMALL_ENTERPRISE", "PRO_SPLIT_LICENSE", "PREMIUM_SPLIT_LICENSE"}
+COHORT_ESSENTIAL = {"ESSENTIAL", "SCALE"}
 COHORT_BASIC = {"STARTER", "MEDIUM", "SMALL"}
 
 # NRR touch tiers
@@ -971,6 +971,60 @@ def cohort_retention_analysis(mrr, plan_set, label=""):
     }
 
 
+def _sandbox_nrr_analysis(mrr):
+    """NRR analysis specifically for sandbox plans (not excluded like in main NRR)."""
+    mrr = prepare_mrr(mrr)
+    cohort = mrr[(mrr["_sp"].isin(SANDBOX_PLANS)) & (mrr["_sm"] > 0)].copy()
+    if cohort.empty:
+        return {"label": "Sandbox", "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
+                "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
+                "plan_breakdown": [], "churned_accounts": [], "expansion_accounts": [],
+                "contraction_accounts": [], "cancel_reason_summary": {}}
+    starting = _s(cohort, "_sm")
+    cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
+    cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
+    retained = cohort["_ret"].sum()
+    churn = _s(cohort[cohort["_churned"]], "_sm")
+    active = cohort[~cohort["_churned"]]
+    exp = active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
+    contr = active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
+    churned_accts = accounts_table(cohort[cohort["_churned"]])
+    return {
+        "label": "Sandbox",
+        "nrr_pct": round(safe_div(retained, starting) * 100, 2) if safe_div(retained, starting) else None,
+        "starting_mrr": money(starting), "ending_mrr": money(retained),
+        "churn_mrr": money(churn), "contraction_mrr": money(contr),
+        "expansion_mrr": money(exp), "plan_breakdown": [],
+        "churned_accounts": churned_accts,
+        "expansion_accounts": accounts_table(active[active["_em"] > active["_sm"]]),
+        "contraction_accounts": accounts_table(active[active["_em"] < active["_sm"]]),
+        "cancel_reason_summary": {},
+    }
+
+
+def _sandbox_retention_analysis(mrr):
+    """Retention analysis specifically for sandbox plans."""
+    mrr = prepare_mrr(mrr)
+    start_active = mrr[(mrr["_sm"] > 0) & (mrr["_sp"].isin(SANDBOX_PLANS))].copy()
+    start_count = len(start_active)
+    if start_count == 0:
+        return {"label": "Sandbox", "start_count": 0, "retained_count": 0,
+                "logo_retention_pct": None, "churned_count": 0, "churned_accounts": [],
+                "expansion_mrr_total": 0, "new_mrr_total": 0}
+    churned = start_active[(start_active["_em"] == 0) | start_active["_ep"].isna()]
+    retained_count = start_count - len(churned)
+    return {
+        "label": "Sandbox",
+        "start_count": start_count,
+        "retained_count": retained_count,
+        "logo_retention_pct": round(retained_count / start_count * 100, 2) if start_count else None,
+        "churned_count": len(churned),
+        "churned_accounts": accounts_table(churned),
+        "expansion_mrr_total": 0,
+        "new_mrr_total": 0,
+    }
+
+
 def build_cohort_data(mrr):
     """Build cohort-specific analysis for all three cohorts + NRR touch tiers."""
     cohorts = {
@@ -980,14 +1034,19 @@ def build_cohort_data(mrr):
             "retention": cohort_retention_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
         },
         "essential": {
-            "nrr": cohort_nrr_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
-            "expansion": cohort_expansion_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
-            "retention": cohort_retention_analysis(mrr, COHORT_ESSENTIAL, "Essential"),
+            "nrr": cohort_nrr_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
+            "expansion": cohort_expansion_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
+            "retention": cohort_retention_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
         },
         "basic": {
             "nrr": cohort_nrr_analysis(mrr, COHORT_BASIC, "Basic"),
             "expansion": cohort_expansion_analysis(mrr, COHORT_BASIC, "Basic"),
             "retention": cohort_retention_analysis(mrr, COHORT_BASIC, "Basic"),
+        },
+        "sandbox": {
+            "nrr": _sandbox_nrr_analysis(mrr),
+            "expansion": cohort_expansion_analysis(mrr, SANDBOX_PLANS, "Sandbox"),
+            "retention": _sandbox_retention_analysis(mrr),
         },
     }
     nrr_by_touch = {
