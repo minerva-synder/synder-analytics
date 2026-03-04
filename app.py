@@ -51,6 +51,7 @@ def save_config(cfg):
 
 
 _hubspot_key_cache = None
+_hubspot_owner_cache = {}  # owner_id -> name, persistent in-memory cache
 
 import base64 as _b64
 
@@ -169,7 +170,13 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
         })
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                resp_body = resp.read().decode("utf-8")
+                data = json.loads(resp_body)
+            # Handle rate limit: retry once after 1.5s
+            if data.get("status") == "error" and "RATE_LIMIT" in data.get("errorType", ""):
+                time.sleep(1.5)
+                with urllib.request.urlopen(req, timeout=20) as resp2:
+                    data = json.loads(resp2.read().decode("utf-8"))
             for company in data.get("results", []):
                 props = company.get("properties", {})
                 oid = str(props.get("synder_organization_id", "")).strip()
@@ -182,10 +189,16 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
                         result[oid] = "Not assigned"
         except Exception:
             continue
+        # Small pause between chunks to avoid rate limiting
+        if i + chunk_size < len(org_id_strs):
+            time.sleep(0.5)
 
-    # Fetch owner names in batch (one call per owner, but owners are cached)
+    # Fetch owner names (with global in-memory cache to avoid repeated lookups)
     owner_names = {}
     for owner_id in owner_ids_needed:
+        if owner_id in _hubspot_owner_cache:
+            owner_names[owner_id] = _hubspot_owner_cache[owner_id]
+            continue
         url = f"https://api.hubapi.com/crm/v3/owners/{owner_id}"
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
         try:
@@ -195,6 +208,7 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
             last = data.get("lastName", "")
             name = f"{first} {last}".strip()
             owner_names[owner_id] = name or "Not assigned"
+            _hubspot_owner_cache[owner_id] = owner_names[owner_id]
         except Exception:
             owner_names[owner_id] = "Not assigned"
 
@@ -2317,7 +2331,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
-def _enrich_all_accounts_with_csm(result, max_orgs=400):
+def _enrich_all_accounts_with_csm(result, max_orgs=200):
     """Enrich the most important account lists with CSM names from HubSpot.
     Only processes high-priority lists to avoid timeouts (max_orgs per request).
     """
