@@ -2382,6 +2382,8 @@ def _enrich_all_accounts_with_csm(result, max_orgs=300):
 
     # Batch lookup (single API call for up to 100 orgs)
     csm_map = hubspot_batch_lookup_orgs(all_org_ids, api_key)
+    assigned_count = sum(1 for v in csm_map.values() if v and v != "Not assigned")
+    print(f"[CSM enrich] Looked up {len(all_org_ids)} orgs, {assigned_count} have CSMs, api_key starts: {api_key[:12] if api_key else 'NONE'}...", flush=True)
 
     # Apply to all priority lists
     for lst in priority_lists:
