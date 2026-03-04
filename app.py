@@ -148,7 +148,7 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
     # HubSpot search supports up to 100 values per IN filter; chunk if needed
     chunk_size = 100
     owner_ids_needed = set()
-    company_to_org = {}  # owner_id -> org_id_str
+    org_to_owner = {}  # org_id_str -> owner_id
 
     for i in range(0, len(org_id_strs), chunk_size):
         chunk = org_id_strs[i:i + chunk_size]
@@ -184,7 +184,7 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
                 if oid:
                     if owner_id:
                         owner_ids_needed.add(owner_id)
-                        company_to_org[owner_id] = oid
+                        org_to_owner[oid] = owner_id
                     else:
                         result[oid] = "Not assigned"
         except Exception:
@@ -213,7 +213,7 @@ def hubspot_batch_lookup_orgs(org_ids, api_key):
             owner_names[owner_id] = "Not assigned"
 
     # Map owner names back to org_ids
-    for owner_id, oid in company_to_org.items():
+    for oid, owner_id in org_to_owner.items():
         result[oid] = owner_names.get(owner_id, "Not assigned")
 
     # Any org not found in HubSpot
@@ -702,7 +702,7 @@ ORGS_MAP = {
     "org_id": ["org_id", "organization_id", "id", "org id"],
     "org_name": ["org_name", "organization_name", "name", "company", "org name"],
     "plan_name": ["plan_name", "plan", "plan_bucket", "current_plan", "end_plan", "plans", "product name"],
-    "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date", "sub started"],
+    "subscription_start_date": ["subscription_start_date", "sub_started", "sub_start", "start_date", "sub started", "first_paid_date"],
     "subscription_interval": ["subscription_interval", "sub_interval", "interval", "billing_interval", "sub interval"],
     "cancellation_date": ["cancellation_date", "unsubscribe_date", "unsub_date", "cancel_date", "unsubscribe date"],
     "subscription_end_date": ["subscription_end_date", "sub_end_date", "sub_end", "end_date", "sub end date"],
@@ -2302,7 +2302,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
-def _enrich_all_accounts_with_csm(result, max_orgs=200):
+def _enrich_all_accounts_with_csm(result, max_orgs=300):
     """Enrich the most important account lists with CSM names from HubSpot.
     Only processes high-priority lists to avoid timeouts (max_orgs per request).
     """
@@ -2571,7 +2571,7 @@ def fetch_data():
                     "subscription_status": sh.get("subscription_status") or (e or s).get("subscription_status", ""),
                     "latest_sub_status": sh.get("latest_sub_status") or (e or s).get("latest_sub_status", ""),
                     # Sync health fields (from separate sync_health query if available)
-                    "subscription_start_date": sh.get("subscription_start_date") or (e or s).get("subscription_start_date", ""),
+                    "subscription_start_date": sh.get("subscription_start_date") or (e or s).get("subscription_start_date", "") or (e or s).get("first_paid_date", ""),
                     "subscription_interval": sh.get("subscription_interval") or (e or s).get("subscription_interval", ""),
                     "last_sync_date": sh.get("last_sync_date") or (e or s).get("last_sync_date", ""),
                     "finished_syncs": sh.get("finished_syncs") or (e or s).get("finished_syncs", 0),
