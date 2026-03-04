@@ -625,6 +625,152 @@ function renderResults(data) {
   try { if (d2.churn_prediction) renderChurn(d2.churn_prediction); } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
   try { if (d2.at_risk) renderAtRisk(d2.at_risk); } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
   try { if (d1.upsell_potential) renderUpsell(d1.upsell_potential); } catch(e) { console.error('[Minerva] renderUpsell failed:', e); }
+
+  // ---- Global background CSM enrichment ----
+  // Collect all org_ids from detailsStore + visible tables and fetch CSM in one batch
+  setTimeout(() => enrichAllStoredDataWithCSM(), 500);
+}
+
+async function enrichAllStoredDataWithCSM() {
+  // Collect ALL unique org_ids from detailsStore
+  const allRows = [];
+  const seen = new Set();
+  Object.values(detailsStore).forEach(d => {
+    (d.rows || []).forEach(r => {
+      if (r && r.org_id && !seen.has(String(r.org_id))) {
+        seen.add(String(r.org_id));
+        allRows.push(r);
+      }
+    });
+  });
+  // Also include at-risk table rows (stored in atRiskData), churn table rows (churnData), expansion top
+  const extraSources = [atRiskData, churnData, expansionData];
+  extraSources.forEach(src => {
+    (src || []).forEach(r => {
+      if (r && r.org_id && !seen.has(String(r.org_id))) {
+        seen.add(String(r.org_id));
+        allRows.push(r);
+      }
+    });
+  });
+
+  if (!allRows.length) return;
+  const orgIds = allRows.map(r => r.org_id).filter(Boolean);
+  if (!orgIds.length) return;
+
+  try {
+    // Batch in chunks of 100
+    const chunkSize = 100;
+    const allResults = {};
+    for (let i = 0; i < orgIds.length; i += chunkSize) {
+      const chunk = orgIds.slice(i, i + chunkSize);
+      const resp = await fetch('/api/csm-lookup', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({org_ids: chunk})
+      });
+      const data = await resp.json();
+      if (data.results) Object.assign(allResults, data.results);
+      if (i + chunkSize < orgIds.length) await new Promise(r => setTimeout(r, 600)); // rate limit pause
+    }
+
+    // Apply CSM to all rows
+    allRows.forEach(r => {
+      const csm = allResults[String(r.org_id)];
+      if (csm) r.csm = csm;
+    });
+
+    // Re-render visible inline tables (sandbox F, G, expansion, at-risk, churn)
+    const sb = analysisResult && analysisResult.dashboard1 && analysisResult.dashboard1.sandbox_cohort;
+    if (sb) {
+      // Re-render F
+      if (sb.F_not_syncing && sb.F_not_syncing.accounts && sb.F_not_syncing.accounts.length) {
+        const fCols = [
+          {key:'org_id', label:'Org ID'},
+          {key:'org_name', label:'Organization'},
+          {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+          {key:'csm', label:'CSM'},
+          {key:'mrr', label:'MRR', fmt: fmt},
+        ];
+        const fTable = document.getElementById('tbl_sandbox_not_syncing');
+        if (fTable) fTable.closest('.table-wrapper').innerHTML = renderTable(sb.F_not_syncing.accounts, fCols, { tableId: 'tbl_sandbox_not_syncing', sortable: true });
+      }
+      // Re-render G
+      if (sb.G_cancelled_will_churn && sb.G_cancelled_will_churn.accounts && sb.G_cancelled_will_churn.accounts.length) {
+        const gCols = [
+          {key:'org_id', label:'Org ID'},
+          {key:'org_name', label:'Organization'},
+          {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+          {key:'csm', label:'CSM'},
+          {key:'mrr', label:'MRR', fmt: fmt},
+          {key:'subscription_end_date', label:'End Date'},
+        ];
+        const gTable = document.getElementById('tbl_sandbox_cancelled');
+        if (gTable) gTable.closest('.table-wrapper').innerHTML = renderTable(sb.G_cancelled_will_churn.accounts, gCols, { tableId: 'tbl_sandbox_cancelled', sortable: true });
+      }
+    }
+    // Re-render expansion table
+    if (expansionData && expansionData.length) {
+      const expCols = [
+        {key:'org_name', label:'Organization', fmt: (v, row) => {
+          const oid = row && row.org_id ? String(row.org_id).trim() : '';
+          const name = esc(v || '');
+          if (!oid) return name || '—';
+          const url = `https://go.synder.com/organizations/view/${encodeURIComponent(oid)}`;
+          return `<a href="${url}" target="_blank" rel="noopener noreferrer">${name}</a>`;
+        }},
+        {key:'csm', label:'CSM'},
+        {key:'starting_mrr', label:'Starting MRR', fmt: v => fmt(parseFloat(v))},
+        {key:'current_mrr', label:'Current MRR', fmt: v => fmt(parseFloat(v))},
+        {key:'delta', label:'Delta', fmt: v => fmt(parseFloat(v))},
+      ];
+      const expTableEl = $('expansionTable');
+      if (expTableEl) expTableEl.innerHTML = renderTable(expansionData, expCols, { tableId: 'tbl_expansion_mrr', sortable: true });
+    }
+    // Re-render churn prediction table
+    if (churnData && churnData.length) {
+      const chTable = document.getElementById('tbl_churn_prediction');
+      if (chTable) {
+        const chCols = [
+          {key:'org_id', label:'Org ID'},
+          {key:'org_name', label:'Organization'},
+          {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+          {key:'plan_display', label:'Plan'},
+          {key:'csm', label:'CSM'},
+          {key:'mrr', label:'MRR', fmt: fmt},
+          {key:'churn_date', label:'Churn date'},
+          {key:'bucket', label:'Bucket'},
+        ];
+        chTable.closest('.table-wrapper') ? chTable.closest('.table-wrapper').innerHTML = renderTable(churnData, chCols, { tableId: 'tbl_churn_prediction', sortable: true }) : null;
+      }
+    }
+    // Re-render at-risk table
+    if (atRiskData && atRiskData.length) {
+      const arEl = $('atRiskTable');
+      if (arEl) {
+        arEl.innerHTML = renderTable(atRiskData, [
+          {key:'tier', label:'Tier'},
+          {key:'org_name', label:'Organization'},
+          {key:'org_id', label:'Org ID'},
+          {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+          {key:'plan_name', label:'Plan'},
+          {key:'csm', label:'CSM'},
+          {key:'mrr', label:'MRR', fmt: fmt},
+          {key:'subscription_start_date', label:'Sub Start'},
+          {key:'interval', label:'Interval'},
+          {key:'last_sync_date', label:'Last Sync'},
+          {key:'days_since_last_sync', label:'Days Since Sync', fmt: num},
+          {key:'sync_volume_total', label:'Total Syncs', fmt: num},
+          {key:'syncs_current_cycle', label:'Syncs (cycle)', fmt: num},
+          {key:'failure_ratio', label:'Failure %', fmt: v => v != null ? (v*100).toFixed(1)+'%' : '—'},
+          {key:'risk_reasons', label:'Risk Reasons'},
+        ], { tableId: 'tbl_at_risk', sortable: true });
+      }
+    }
+
+  } catch(e) {
+    console.warn('[Minerva] Background CSM enrichment failed:', e);
+  }
 }
 
 function renderSandbox(sb) {
@@ -674,9 +820,17 @@ function renderSandbox(sb) {
   // F
   if (sb.F_not_syncing) {
     const f = sb.F_not_syncing;
-    let html = metricCard('Not Syncing', num(f.count), 'MRR: ' + fmt(f.mrr), 'amber');
+    const fCols = [
+      {key:'org_id', label:'Org ID'},
+      {key:'org_name', label:'Organization'},
+      {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+      {key:'csm', label:'CSM'},
+      {key:'mrr', label:'MRR', fmt: fmt},
+    ];
+    setDetails('sb_not_syncing', 'Sandbox — not syncing', f.accounts || []);
+    let html = metricCard('Not Syncing', num(f.count), 'MRR: ' + fmt(f.mrr), 'amber', 'sb_not_syncing');
     if (f.accounts && f.accounts.length) {
-      html += renderSmallTable(f.accounts, ['org_id', 'org_name', 'mrr'], { tableId: 'tbl_sandbox_not_syncing', sortable: true });
+      html += `<div class="col-12"><div class="table-wrapper mt-2">${renderTable(f.accounts, fCols, { tableId: 'tbl_sandbox_not_syncing', sortable: true })}</div></div>`;
     }
     $('sandboxNotSyncing').innerHTML = `<div class="row g-3">${html}</div>`;
   } else {
@@ -686,9 +840,18 @@ function renderSandbox(sb) {
   // G
   if (sb.G_cancelled_will_churn) {
     const g = sb.G_cancelled_will_churn;
-    let html = metricCard('Will Churn', num(g.count), 'MRR at risk: ' + fmt(g.mrr_at_risk), 'red');
+    const gCols = [
+      {key:'org_id', label:'Org ID'},
+      {key:'org_name', label:'Organization'},
+      {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+      {key:'csm', label:'CSM'},
+      {key:'mrr', label:'MRR', fmt: fmt},
+      {key:'subscription_end_date', label:'End Date'},
+    ];
+    setDetails('sb_will_churn', 'Sandbox — will churn (cancelled)', g.accounts || []);
+    let html = metricCard('Will Churn', num(g.count), 'MRR at risk: ' + fmt(g.mrr_at_risk), 'red', 'sb_will_churn');
     if (g.accounts && g.accounts.length) {
-      html += renderSmallTable(g.accounts, ['org_id', 'org_name', 'mrr', 'subscription_end_date'], { tableId: 'tbl_sandbox_cancelled', sortable: true });
+      html += `<div class="col-12"><div class="table-wrapper mt-2">${renderTable(g.accounts, gCols, { tableId: 'tbl_sandbox_cancelled', sortable: true })}</div></div>`;
     }
     $('sandboxCancelled').innerHTML = `<div class="row g-3">${html}</div>`;
   } else {
@@ -907,6 +1070,7 @@ function renderChurn(ch) {
   $('churnTable').innerHTML = renderTable(ch.accounts, [
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
+    {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
     {key:'plan_display', label:'Plan'},
     {key:'csm', label:'CSM'},
     {key:'mrr', label:'MRR', fmt: fmt},
@@ -948,6 +1112,7 @@ function renderAtRisk(ar) {
     {key:'tier', label:'Tier'},
     {key:'org_name', label:'Organization'},
     {key:'org_id', label:'Org ID'},
+    {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
     {key:'plan_name', label:'Plan'},
     {key:'csm', label:'CSM'},
     {key:'mrr', label:'MRR', fmt: fmt},
