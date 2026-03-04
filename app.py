@@ -2070,17 +2070,65 @@ def fetch_data():
         if start_date: payload["start_date"] = start_date
         if end_date: payload["end_date"] = end_date
 
-        # 1. Try Retool Workflow webhook
+        # 1. Try Retool Workflow webhook — two fast calls (end + start), merge in Python
         try:
-            raw = fetch_retool_webhook("organizations", payload=payload or None)
-            if isinstance(raw, dict) and raw.get("error"):
-                raise Exception(f"Retool HTTP {raw.get('status')}: {raw.get('body','')[:500]}")
-            rows = _extract_rows_from_retool_response(raw)
-        except Exception as e:
+            # Fetch end-date snapshot (latest by default)
+            end_payload = {"target_date": end_date} if end_date else {}
+            raw_end = fetch_retool_webhook("organizations", payload=end_payload or None)
+            if isinstance(raw_end, dict) and raw_end.get("error"):
+                raise Exception(f"Retool HTTP {raw_end.get('status')}: {raw_end.get('body','')[:500]}")
+            end_rows = _extract_rows_from_retool_response(raw_end)
+
+            # Determine start_date from end snapshot if not provided
+            if not start_date and end_rows:
+                from datetime import datetime, timedelta
+                snap = end_rows[0].get("snapshot_date", "")
+                try:
+                    end_dt = datetime.fromisoformat(snap.replace("Z", "+00:00")) if snap else datetime.utcnow()
+                    start_date = (end_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+                except Exception:
+                    start_date = None
+
+            # Fetch start-date snapshot
+            if start_date:
+                start_payload = {"target_date": start_date}
+                raw_start = fetch_retool_webhook("organizations", payload=start_payload)
+                if isinstance(raw_start, dict) and raw_start.get("error"):
+                    raise Exception(f"Retool start HTTP {raw_start.get('status')}: {raw_start.get('body','')[:500]}")
+                start_rows = _extract_rows_from_retool_response(raw_start)
+            else:
+                start_rows = end_rows  # fallback: same as end
+
+            # Merge start + end into the format build_dataframes_from_rows expects
+            start_by_id = {str(r.get("org_id", "")): r for r in start_rows}
+            end_by_id = {str(r.get("org_id", "")): r for r in end_rows}
+            all_ids = set(start_by_id.keys()) | set(end_by_id.keys())
+
+            snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
+            snapshot_start_date = start_rows[0].get("snapshot_date", "") if start_rows else ""
+
             rows = []
-            webhook_error = str(e)
+            for oid in all_ids:
+                s = start_by_id.get(oid, {})
+                e = end_by_id.get(oid, {})
+                rows.append({
+                    "org_id": oid,
+                    "org_link": (e or s).get("org_link", f"https://go.synder.com/organizations/view/{oid}"),
+                    "org_name": (e or s).get("org_name", f"Org {oid}"),
+                    "end_plan": e.get("plan", ""),
+                    "start_plan": s.get("plan", ""),
+                    "end_mrr": float(e.get("mrr", 0) or 0),
+                    "start_mrr": float(s.get("mrr", 0) or 0),
+                    "snapshot_end_date": snapshot_end_date,
+                    "snapshot_start_date": snapshot_start_date,
+                    "industry": (e or s).get("industry", ""),
+                    "first_paid_date": (e or s).get("first_paid_date", ""),
+                })
+        except Exception as exc:
+            rows = []
+            webhook_error = str(exc)
             import traceback as _tb
-            print(f"[fetch-data] Retool webhook error: {e}\n{_tb.format_exc()}", flush=True)
+            print(f"[fetch-data] Retool webhook error: {exc}\n{_tb.format_exc()}", flush=True)
         else:
             webhook_error = None
 
