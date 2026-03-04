@@ -918,9 +918,11 @@ def cohort_nrr_analysis(mrr, plan_set, label=""):
 
 
 def cohort_expansion_analysis(mrr, plan_set, label=""):
-    """Run expansion analysis filtered to a cohort."""
+    """Run expansion analysis filtered to a cohort.
+    Only includes orgs whose end_plan is in the plan set (they belong to this tier now).
+    """
     mrr = prepare_mrr(mrr)
-    subset = mrr[mrr["_sp"].isin(plan_set) | mrr["_ep"].isin(plan_set)].copy()
+    subset = mrr[mrr["_ep"].isin(plan_set)].copy()
     subset["_delta"] = subset["_em"] - subset["_sm"]
     exp = subset[(subset["_sm"] > 0) & (subset["_delta"] > 0)].sort_values("_delta", ascending=False)
     new_mrr = subset[(subset["_sm"] == 0) & (subset["_em"] > 0)].sort_values("_em", ascending=False)
