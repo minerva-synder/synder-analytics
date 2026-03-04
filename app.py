@@ -2173,7 +2173,7 @@ def fetch_data():
             # Orgs may have multiple rows (base plan + add-ons). Keep the one with highest MRR
             # as primary, and sum all MRRs for total.
             def _dedup_by_id(row_list):
-                """Group rows by org_id: keep highest-MRR plan as primary, sum total MRR."""
+                """Group rows by org_id: keep base plan as primary, sum total MRR."""
                 groups = {}
                 for r in row_list:
                     oid = str(r.get("org_id", ""))
@@ -2182,8 +2182,12 @@ def fetch_data():
                     groups[oid].append(r)
                 result = {}
                 for oid, rlist in groups.items():
-                    # Pick the row with highest MRR as primary (that's the base plan)
-                    primary = max(rlist, key=lambda x: float(x.get("mrr", 0) or 0))
+                    # Prefer base plans over add-ons; break ties by MRR
+                    def _plan_sort_key(x):
+                        p = (x.get("plan", "") or "").upper()
+                        is_addon = p in ADDON_PLANS
+                        return (0 if not is_addon else 1, -float(x.get("mrr", 0) or 0))
+                    primary = min(rlist, key=_plan_sort_key)
                     total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
                     primary = dict(primary)
                     primary["mrr"] = total_mrr
