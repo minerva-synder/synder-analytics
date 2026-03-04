@@ -252,7 +252,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div class="section-title">2b. NRR by Touch Tier</div>
         <div class="row g-3 mb-3">
           <div class="col-md-6">
-            <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Scale, Enterprise)</h6>
+            <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Enterprise)</h6>
             <div class="row g-3 mb-2" id="nrrTouchHighMed"></div>
           </div>
           <div class="col-md-6">
@@ -501,13 +501,12 @@ function renderDetailsTable(rows) {
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
   const hasLastDate = rows.some(r => r.last_mrr_date != null);
   const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
-  const hasCSM = rows.some(r => r.csm != null && r.csm !== '');
 
   const cols = [
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
     {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
-    ...(hasCSM ? [{key:'csm', label:'CSM'}] : []),
+    {key:'csm', label:'CSM'},
     {key:'start_plan', label:'Start Plan'},
     {key:'end_plan', label:'End Plan'},
     ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
@@ -883,11 +882,12 @@ function renderChurn(ch) {
   (ch.accounts || []).forEach(a => {
     const k = a.bucket || 'unknown';
     if (!acctByBucket[k]) acctByBucket[k] = [];
-    // Normalize to drill-down format
+    // Normalize to drill-down format — preserve CSM and synder_url
     acctByBucket[k].push({
       org_id: a.org_id,
       org_name: a.org_name,
-      synder_url: a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : '',
+      synder_url: a.synder_url || (a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : ''),
+      csm: a.csm || 'Not assigned',
       start_plan: a.plan_display || '',
       end_plan: a.plan_display || '',
       start_mrr: a.mrr,
@@ -921,7 +921,8 @@ function renderAtRisk(ar) {
   setDetails('at_risk_all', 'At-risk accounts (high/medium touch)', (ar.accounts || []).map(a => ({
     org_id: a.org_id,
     org_name: a.org_name,
-    synder_url: a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : '',
+    synder_url: a.synder_url || (a.org_id ? `https://go.synder.com/organizations/view/${a.org_id}` : ''),
+    csm: a.csm || 'Not assigned',
     start_plan: a.plan_name || '',
     end_plan: a.plan_name || '',
     start_mrr: a.mrr,
@@ -955,6 +956,7 @@ function renderAtRisk(ar) {
     {key:'last_sync_date', label:'Last Sync'},
     {key:'days_since_last_sync', label:'Days Since Sync', fmt: num},
     {key:'sync_volume_total', label:'Total Syncs', fmt: num},
+    {key:'syncs_current_cycle', label:'Syncs (cycle)', fmt: num},
     {key:'failure_ratio', label:'Failure %', fmt: v => v != null ? (v*100).toFixed(1)+'%' : '—'},
     {key:'risk_reasons', label:'Risk Reasons'},
     {key:'in_grace_window', label:'Grace?'},
@@ -1006,6 +1008,8 @@ function renderUpsell(up) {
     $('upsellTable').innerHTML = renderTable(up.candidates, [
       {key:'org_id', label:'Org ID'},
       {key:'org_name', label:'Organization'},
+      {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+      {key:'csm', label:'CSM'},
       {key:'end_mrr', label:'MRR', fmt: fmt},
       {key:'tenure_days', label:'Tenure (days)'},
       {key:'score', label:'Score'},
@@ -1191,13 +1195,11 @@ function renderDetailsTableWithMigration(rows, key) {
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
   const hasLastDate = rows.some(r => r.last_mrr_date != null);
   const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
-  const hasCSM = rows.some(r => r.csm != null && r.csm !== '');
-
   const cols = [
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
     {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
-    ...(hasCSM ? [{key:'csm', label:'CSM'}] : []),
+    {key:'csm', label:'CSM'},
     {key:'start_plan', label:'Start Plan'},
     {key:'end_plan', label:'End Plan'},
     ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
@@ -1262,12 +1264,8 @@ function showDetails(key) {
   const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
   modal.show();
 
-  // Auto-enrich with CSM names for high/med touch modals
-  if (key.startsWith('hm_') || key.startsWith('ntt_hm') || key.startsWith('ett_hm') ||
-      key === 'nrr_churned' || key === 'nrr_churn_plus_contr' || key === 'nrr_expanders' ||
-      key === 'ret_churned' || key === 'ret_expansion_mrr' || key === 'exp_all' || key === 'new_mrr_all') {
-    enrichWithCSM(d.rows, key);
-  }
+  // Auto-enrich with CSM names for ALL modals
+  enrichWithCSM(d.rows, key);
 }
 
 async function enrichRowsWithCSM(rows, onDone) {
