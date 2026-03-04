@@ -1894,7 +1894,9 @@ def fetch_retool_webhook(query_name="organizations", payload=None):
         headers={"X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY},
         timeout=180,
     )
-    resp.raise_for_status()
+    # Don't raise here; return a structured error so the caller can surface it.
+    if resp.status_code >= 400:
+        return {"error": True, "status": resp.status_code, "body": resp.text[:2000]}
     return resp.json()
 
 
@@ -2071,6 +2073,8 @@ def fetch_data():
         # 1. Try Retool Workflow webhook
         try:
             raw = fetch_retool_webhook("organizations", payload=payload or None)
+            if isinstance(raw, dict) and raw.get("error"):
+                raise Exception(f"Retool HTTP {raw.get('status')}: {raw.get('body','')[:500]}")
             rows = _extract_rows_from_retool_response(raw)
         except Exception as e:
             rows = []
