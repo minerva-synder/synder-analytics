@@ -43,7 +43,7 @@ def save_config(cfg):
 
 
 def get_hubspot_api_key():
-    return load_config().get("hubspot_api_key", "")
+    return os.environ.get("HUBSPOT_API_KEY", "") or load_config().get("hubspot_api_key", "")
 
 def get_retool_config():
     cfg = load_config()
@@ -2463,6 +2463,35 @@ def monthly_cohort():
             })
 
         return jsonify({"success": True, "cohorts": cohort_rows})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/csm-lookup", methods=["POST"])
+def csm_lookup():
+    """Batch lookup CSM names from HubSpot for a list of org_ids."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        org_ids = data.get("org_ids", [])
+        if not org_ids:
+            return jsonify({"results": {}})
+
+        api_key = get_hubspot_api_key()
+        if not api_key:
+            # Return "Not assigned" for all when no API key
+            return jsonify({"results": {str(oid): "Not assigned" for oid in org_ids}})
+
+        cache = {}
+        results = {}
+        for oid in org_ids[:200]:  # Limit to 200 to avoid timeout
+            lookup = hubspot_lookup_org(oid, api_key, cache)
+            csm = lookup.get("csm", "N/A")
+            results[str(oid)] = csm if csm != "N/A" else "Not assigned"
+
+        return jsonify({"results": results})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

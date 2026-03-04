@@ -501,11 +501,13 @@ function renderDetailsTable(rows) {
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
   const hasLastDate = rows.some(r => r.last_mrr_date != null);
   const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
+  const hasCSM = rows.some(r => r.csm != null && r.csm !== '');
 
   const cols = [
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
     {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+    ...(hasCSM ? [{key:'csm', label:'CSM'}] : []),
     {key:'start_plan', label:'Start Plan'},
     {key:'end_plan', label:'End Plan'},
     ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
@@ -1183,11 +1185,13 @@ function renderDetailsTableWithMigration(rows, key) {
   const hasLast = rows.some(r => r.last_mrr_before_churn != null);
   const hasLastDate = rows.some(r => r.last_mrr_date != null);
   const hasCancelReason = rows.some(r => r.cancel_reason != null && r.cancel_reason !== '');
+  const hasCSM = rows.some(r => r.csm != null && r.csm !== '');
 
   const cols = [
     {key:'org_id', label:'Org ID'},
     {key:'org_name', label:'Organization'},
     {key:'synder_url', label:'Synder', fmt: v => v ? `<a href="${v}" target="_blank">open</a>` : '—'},
+    ...(hasCSM ? [{key:'csm', label:'CSM'}] : []),
     {key:'start_plan', label:'Start Plan'},
     {key:'end_plan', label:'End Plan'},
     ...(hasLast ? [{key:'last_mrr_before_churn', label:'Last MRR before churn', fmt: fmt}] : [{key:'start_mrr', label:'Start MRR', fmt: fmt}]),
@@ -1251,6 +1255,44 @@ function showDetails(key) {
 
   const modal = new bootstrap.Modal(document.getElementById('detailsModal'));
   modal.show();
+
+  // Auto-enrich with CSM names for high/med touch modals
+  if (key.startsWith('hm_') || key.startsWith('ntt_hm')) {
+    enrichWithCSM(d.rows, key);
+  }
+}
+
+async function enrichWithCSM(rows, key) {
+  if (!rows || !rows.length) return;
+  const orgIds = rows.map(r => r.org_id).filter(Boolean);
+  if (!orgIds.length) return;
+  try {
+    const resp = await fetch('/api/csm-lookup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({org_ids: orgIds})
+    });
+    const data = await resp.json();
+    if (!data.results) return;
+    // Update rows with CSM names
+    rows.forEach(r => {
+      if (r.org_id && data.results[String(r.org_id)]) {
+        r.csm = data.results[String(r.org_id)];
+      } else {
+        r.csm = r.csm || 'Not assigned';
+      }
+    });
+    // Re-render the modal table
+    const d = detailsStore[key];
+    if (d && detailsActiveKey === key) {
+      const hasMigration = (key === 'ret_churned' || key === 'nrr_churned' || key === 'nrr_churn_plus_contr');
+      if (hasMigration) {
+        $('detailsTable').innerHTML = renderDetailsTableWithMigration(d.rows, key);
+      } else {
+        $('detailsTable').innerHTML = renderDetailsTable(d.rows);
+      }
+    }
+  } catch(e) { console.warn('CSM lookup failed:', e); }
 }
 
 async function doSubMigration(orgId) {
