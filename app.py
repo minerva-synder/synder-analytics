@@ -114,7 +114,7 @@ def hubspot_search_company_by_org_id(org_id, api_key):
                 "value": org_id_str
             }]
         }],
-        "properties": ["name", "hubspot_owner_id", "custom_configurations"],
+        "properties": ["name", "hubspot_owner_id", "custom_configurations", "synder_organization_id"],
         "limit": 1
     }).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={
@@ -130,6 +130,84 @@ def hubspot_search_company_by_org_id(org_id, api_key):
     except Exception:
         pass
     return None
+
+
+def hubspot_batch_lookup_orgs(org_ids, api_key):
+    """Batch lookup CSM names for a list of org_ids using HubSpot IN filter.
+    Returns dict: {org_id_str -> csm_name}. Uses at most 2 API calls (companies + owners).
+    """
+    if not api_key or not org_ids:
+        return {}
+
+    org_id_strs = [str(o).strip() for o in org_ids if str(o).strip()]
+    if not org_id_strs:
+        return {}
+
+    result = {}
+    # HubSpot search supports up to 100 values per IN filter; chunk if needed
+    chunk_size = 100
+    owner_ids_needed = set()
+    company_to_org = {}  # owner_id -> org_id_str
+
+    for i in range(0, len(org_id_strs), chunk_size):
+        chunk = org_id_strs[i:i + chunk_size]
+        url = "https://api.hubapi.com/crm/v3/objects/companies/search"
+        payload = json.dumps({
+            "filterGroups": [{
+                "filters": [{
+                    "propertyName": "synder_organization_id",
+                    "operator": "IN",
+                    "values": chunk
+                }]
+            }],
+            "properties": ["name", "hubspot_owner_id", "synder_organization_id"],
+            "limit": chunk_size
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for company in data.get("results", []):
+                props = company.get("properties", {})
+                oid = str(props.get("synder_organization_id", "")).strip()
+                owner_id = props.get("hubspot_owner_id")
+                if oid:
+                    if owner_id:
+                        owner_ids_needed.add(owner_id)
+                        company_to_org[owner_id] = oid
+                    else:
+                        result[oid] = "Not assigned"
+        except Exception:
+            continue
+
+    # Fetch owner names in batch (one call per owner, but owners are cached)
+    owner_names = {}
+    for owner_id in owner_ids_needed:
+        url = f"https://api.hubapi.com/crm/v3/owners/{owner_id}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            first = data.get("firstName", "")
+            last = data.get("lastName", "")
+            name = f"{first} {last}".strip()
+            owner_names[owner_id] = name or "Not assigned"
+        except Exception:
+            owner_names[owner_id] = "Not assigned"
+
+    # Map owner names back to org_ids
+    for owner_id, oid in company_to_org.items():
+        result[oid] = owner_names.get(owner_id, "Not assigned")
+
+    # Any org not found in HubSpot
+    for oid in org_id_strs:
+        if oid not in result:
+            result[oid] = "Not assigned"
+
+    return result
 
 
 def hubspot_get_owner_name(owner_id, api_key):
@@ -2239,7 +2317,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
-def _enrich_all_accounts_with_csm(result, max_orgs=150):
+def _enrich_all_accounts_with_csm(result, max_orgs=400):
     """Enrich the most important account lists with CSM names from HubSpot.
     Only processes high-priority lists to avoid timeouts (max_orgs per request).
     """
@@ -2317,12 +2395,8 @@ def _enrich_all_accounts_with_csm(result, max_orgs=150):
     if not all_org_ids:
         return result
 
-    # Batch lookup
-    hs_cache = {}
-    csm_map = {}
-    for oid in all_org_ids:
-        hs = hubspot_lookup_org(oid, api_key, hs_cache)
-        csm_map[oid] = hs.get("csm", "Not assigned")
+    # Batch lookup (single API call for up to 100 orgs)
+    csm_map = hubspot_batch_lookup_orgs(all_org_ids, api_key)
 
     # Apply to all priority lists
     for lst in priority_lists:
@@ -2923,12 +2997,13 @@ def csm_lookup():
             # Return "Not assigned" for all when no API key
             return jsonify({"results": {str(oid): "Not assigned" for oid in org_ids}, "debug": "no_api_key"})
 
-        cache = {}
-        results = {}
-        for oid in org_ids[:200]:  # Limit to 200 to avoid timeout
-            lookup = hubspot_lookup_org(oid, api_key, cache)
-            csm = lookup.get("csm", "Not assigned")
-            results[str(oid)] = csm if csm else "Not assigned"
+        # Use batch lookup for speed (1-2 API calls instead of N)
+        results = hubspot_batch_lookup_orgs(org_ids[:200], api_key)
+        # Ensure all requested org_ids are in the response
+        for oid in org_ids[:200]:
+            k = str(oid)
+            if k not in results:
+                results[k] = "Not assigned"
 
         return jsonify({"results": results})
     except Exception as e:
