@@ -2783,8 +2783,11 @@ def monthly_cohort():
         today = date.today().replace(day=1)  # 1st of current month
         months = []
         for i in range(12, 0, -1):
-            # Start = 1st of month (i months ago)
-            m_start = (today - timedelta(days=i * 30)).replace(day=1)
+            # Use proper calendar month arithmetic to avoid duplicate months
+            month_offset = today.month - i
+            year_offset = today.year + (month_offset - 1) // 12
+            month_val = ((month_offset - 1) % 12) + 1
+            m_start = date(year_offset, month_val, 1)
             # End = 1st of next month
             if m_start.month == 12:
                 m_end = m_start.replace(year=m_start.year + 1, month=1)
