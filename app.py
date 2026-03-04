@@ -836,11 +836,8 @@ def enrich_sandbox(sb, mrr, orgs):
     m = sb_now_direct.merge(orgs, on="org_id", how="left", suffixes=("", "_o"))
     today = pd.Timestamp.now().normalize()
 
-    api_key = get_hubspot_api_key()
-    hs_cache = {}
-
     def _enrich_accounts(rows_df, extra_cols=None):
-        """Build account list with CSM and Synder URL."""
+        """Build account list with CSM placeholder (enriched later by _enrich_all_accounts_with_csm)."""
         accts = []
         for _, r in rows_df.iterrows():
             oid = str(r.get("org_id", ""))
@@ -849,15 +846,11 @@ def enrich_sandbox(sb, mrr, orgs):
                 "synder_url": synder_org_url(oid),
                 "org_name": r.get("org_name", ""),
                 "mrr": money(r.get("_em", 0)),
+                "csm": "Not assigned",
             }
             if extra_cols:
                 for ec in extra_cols:
                     acc[ec] = r.get(ec, None)
-            if api_key and oid:
-                hs = hubspot_lookup_org(oid, api_key, hs_cache)
-                acc["csm"] = hs["csm"]
-            else:
-                acc["csm"] = "Not assigned"
             accts.append(acc)
         return accts
 
@@ -1384,21 +1377,11 @@ def churn_prediction(mrr, orgs):
     valid_cols = [c for c in cols if c in wc.columns]
     accounts = wc.sort_values("days_to_churn")[valid_cols].head(100).to_dict("records")
 
-    # HubSpot CSM lookup + sandbox detection + Synder URL
-    api_key = get_hubspot_api_key()
-    hs_cache = {}
+    # Set synder_url and CSM placeholder (enriched later by _enrich_all_accounts_with_csm)
     for acc in accounts:
         oid = str(acc.get("org_id", ""))
         acc["synder_url"] = synder_org_url(oid)
-        if api_key and oid:
-            hs = hubspot_lookup_org(oid, api_key, hs_cache)
-            acc["csm"] = hs["csm"]
-            if hs["custom_configurations"] and "enable_pro_sandbox" in hs["custom_configurations"]:
-                plan = acc.get("plan_display", "") or ""
-                if plan.upper() in ("PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE"):
-                    acc["plan_display"] = "Sandbox"
-        else:
-            acc["csm"] = "Not assigned"
+        acc["csm"] = "Not assigned"
 
     return {
         "total_count": len(wc), "total_mrr_at_risk": money(wc["mrr"].sum()),
@@ -1416,8 +1399,6 @@ def churn_from_mrr(mrr):
         return {"total_count": 0, "total_mrr_at_risk": 0, "buckets": [], "accounts": []}
 
     # No time-based buckets available — group all under "This period"
-    api_key = get_hubspot_api_key()
-    hs_cache = {}
     accounts = []
     for _, r in churned.head(200).iterrows():
         oid = str(r.get("org_id", ""))
@@ -1431,11 +1412,7 @@ def churn_from_mrr(mrr):
             "subscription_end_date": "",
             "bucket": "This period",
         }
-        if api_key and oid:
-            hs = hubspot_lookup_org(oid, api_key, hs_cache)
-            acc["csm"] = hs["csm"]
-        else:
-            acc["csm"] = "Not assigned"
+        acc["csm"] = "Not assigned"
         accounts.append(acc)
 
     return {
@@ -1519,8 +1496,6 @@ def at_risk_analysis(mrr, orgs):
         ar["org_name"] = ar["_oid"].map(name_lu).fillna("")
 
     accounts = []
-    api_key = get_hubspot_api_key()
-    hs_cache = {}
     for _, r in ar.head(100).iterrows():
         oid = str(r.get("org_id", ""))
         acc = {
@@ -1540,11 +1515,7 @@ def at_risk_analysis(mrr, orgs):
             "risk_reasons": ", ".join(r["_rr"]),
             "in_grace_window": "yes" if r["_grace"] else "no",
         }
-        if api_key and oid:
-            hs = hubspot_lookup_org(oid, api_key, hs_cache)
-            acc["csm"] = hs["csm"]
-        else:
-            acc["csm"] = "Not assigned"
+        acc["csm"] = "Not assigned"
         accounts.append(acc)
 
     return {"total_at_risk": len(ar), "accounts": accounts, "warnings": []}
