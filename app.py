@@ -723,6 +723,12 @@ def enrich_sandbox(sb, mrr, orgs):
     return sb
 
 
+def is_sub_migrated(row):
+    """Return True if org was subscription-migrated (trial_expired latest sub) — exclude from churn."""
+    lss = str(row.get("latest_sub_status", "") or "").upper()
+    return lss == "TRIAL_EXPIRED"
+
+
 def nrr_analysis(mrr):
     mrr = prepare_mrr(mrr)
     # NRR is calculated on an existing revenue base only:
@@ -736,6 +742,10 @@ def nrr_analysis(mrr):
 
     starting = _s(cohort, "_sm")
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
+    # Exclude sub-migrated orgs from churn (TRIAL_EXPIRED latest_sub_status = Synder-migrated, not voluntary)
+    if "latest_sub_status" in cohort.columns:
+        cohort["_sub_migrated"] = cohort.apply(is_sub_migrated, axis=1)
+        cohort.loc[cohort["_sub_migrated"], "_churned"] = False
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
@@ -797,8 +807,11 @@ def retention_analysis(mrr, orgs=None):
     start_active = mrr[mrr["_sm"] > 0].copy()
     start_count = len(start_active)
 
-    # Churned: had MRR at start, 0 at end
-    churned = start_active[(start_active["_em"] == 0) | start_active["_ep"].isna()]
+    # Churned: had MRR at start, 0 at end — exclude sub-migrated orgs
+    churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
+    if "latest_sub_status" in start_active.columns:
+        churned_mask = churned_mask & ~start_active.apply(is_sub_migrated, axis=1)
+    churned = start_active[churned_mask]
     churned_count = len(churned)
 
     # Downgraded: end plan is a lower tier than start plan
@@ -915,6 +928,9 @@ def cohort_nrr_analysis(mrr, plan_set, label=""):
 
     starting = _s(cohort, "_sm")
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
+    if "latest_sub_status" in cohort.columns:
+        cohort["_sub_migrated"] = cohort.apply(is_sub_migrated, axis=1)
+        cohort.loc[cohort["_sub_migrated"], "_churned"] = False
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
@@ -968,7 +984,11 @@ def cohort_retention_analysis(mrr, plan_set, label=""):
                 "logo_retention_pct": None, "churned_count": 0,
                 "churned_accounts": [], "expansion_mrr_total": 0, "new_mrr_total": 0}
 
-    churned = start_active[(start_active["_em"] == 0) | start_active["_ep"].isna()]
+    churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
+    # Exclude sub-migrated orgs from churn (TRIAL_EXPIRED = Synder-initiated migration, not voluntary)
+    if "latest_sub_status" in start_active.columns:
+        churned_mask = churned_mask & ~start_active.apply(is_sub_migrated, axis=1)
+    churned = start_active[churned_mask]
     churned_count = len(churned)
     retained_count = start_count - churned_count
     logo_retention_pct = round(retained_count / start_count * 100, 2) if start_count else None
@@ -2007,6 +2027,7 @@ def build_dataframes_from_rows(rows):
         "start_mrr": ["start_mrr", "mrr", "sub_amount", "amount", "mrr_current"],
         "end_mrr": ["end_mrr", "mrr", "sub_amount", "amount", "mrr_current"],
         "org_link": ["org_link", "synder_link"],
+        "latest_sub_status": ["latest_sub_status"],
     }
     mrr_df, mrr_warns = map_cols(df, mrr_map_live)
     # If only single snapshot (no start columns), fall back to end = start
@@ -2244,6 +2265,7 @@ def fetch_data():
                     "subscription_end_date": (e or s).get("subscription_end_date", ""),
                     "cancellation_date": (e or s).get("cancellation_date", ""),
                     "subscription_status": (e or s).get("subscription_status", ""),
+                    "latest_sub_status": (e or s).get("latest_sub_status", ""),
                 })
         except Exception as exc:
             rows = []
