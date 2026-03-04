@@ -511,8 +511,11 @@ function renderDetailsTable(rows) {
     ...(hasCancelReason ? [{key:'cancel_reason', label:'Cancel Reason'}] : []),
   ];
 
-  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
-  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  const tblId = 'tbl_details_generic';
+  let html = `<table id="${tblId}" class="table table-sm table-hover data-table mb-0"><thead><tr>`;
+  cols.forEach((c, idx) => {
+    html += `<th class="sortable" onclick="sortTable('${tblId}', ${idx})">${c.label}<span class="sort-indicator"></span></th>`;
+  });
   html += '</tr></thead><tbody>';
 
   rows.forEach(r => {
@@ -1191,8 +1194,15 @@ function renderDetailsTableWithMigration(rows, key) {
 
   if (showMigBtn) cols.push({key:'_action', label:'Action'});
 
-  let html = '<table class="table table-sm table-hover data-table mb-0"><thead><tr>';
-  cols.forEach(c => { html += `<th>${c.label}</th>`; });
+  const tblId = 'tbl_details_' + key;
+  let html = `<table id="${tblId}" class="table table-sm table-hover data-table mb-0"><thead><tr>`;
+  cols.forEach((c, idx) => {
+    if (c.key !== '_action') {
+      html += `<th class="sortable" onclick="sortTable('${tblId}', ${idx})">${c.label}<span class="sort-indicator"></span></th>`;
+    } else {
+      html += `<th>${c.label}</th>`;
+    }
+  });
   html += '</tr></thead><tbody>';
 
   rows.forEach(r => {
