@@ -2143,6 +2143,10 @@ def fetch_data():
                     "snapshot_start_date": snapshot_start_date,
                     "industry": (e or s).get("industry", ""),
                     "first_paid_date": (e or s).get("first_paid_date", ""),
+                    "total_syncs": (e or s).get("total_syncs", 0),
+                    "subscription_end_date": (e or s).get("subscription_end_date", ""),
+                    "cancellation_date": (e or s).get("cancellation_date", ""),
+                    "subscription_status": (e or s).get("subscription_status", ""),
                 })
         except Exception as exc:
             rows = []
