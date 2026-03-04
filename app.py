@@ -709,6 +709,8 @@ def nrr_analysis(mrr):
     # - exclude new MRR (start_mrr == 0)
     # - exclude sandbox plans
     cohort = mrr[(mrr["_sp"].isin(NRR_PLANS)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
+    # Exclude orgs that ended on a sandbox plan — they belong in the sandbox cohort, not here
+    cohort = cohort[~cohort["_ep"].apply(is_sandbox)].copy()
     if cohort.empty:
         return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": []}
 
@@ -884,6 +886,8 @@ def cohort_nrr_analysis(mrr, plan_set, label=""):
     """Run NRR analysis filtered to orgs whose start plan is in plan_set."""
     mrr = prepare_mrr(mrr)
     cohort = mrr[(mrr["_sp"].isin(plan_set)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
+    # Exclude orgs that ended on sandbox — they belong in the sandbox cohort
+    cohort = cohort[~cohort["_ep"].apply(is_sandbox)].copy()
     if cohort.empty:
         return {"label": label, "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
                 "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
