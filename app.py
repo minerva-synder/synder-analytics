@@ -2346,12 +2346,22 @@ def _enrich_all_accounts_with_csm(result, max_orgs=500):
     # Cohort data expansion/churn account lists
     cd = d1.get("cohort_data", {}) or {}
     for tier_group in [cd.get("cohorts", {}), cd.get("nrr_by_touch", {}), cd.get("expansion_by_touch", {})]:
-        for tier in (tier_group or {}).values():
-            if not isinstance(tier, dict): continue
-            for sub in tier.values():
-                if not isinstance(sub, dict): continue
-                for k in ["churned_accounts", "expansion_accounts", "all_expanders", "new_mrr_accounts"]:
-                    if sub.get(k): priority_lists.append(sub[k])
+        if not isinstance(tier_group, dict):
+            continue
+        for tier_key, tier in tier_group.items():
+            if not isinstance(tier, dict):
+                continue
+            # nrr_by_touch/expansion_by_touch: tier is directly {churned_accounts: [...], ...}
+            for k in ["churned_accounts", "expansion_accounts", "contraction_accounts", "all_expanders", "new_mrr_accounts"]:
+                if tier.get(k) and isinstance(tier[k], list):
+                    priority_lists.append(tier[k])
+            # cohorts: tier has sub-dicts like {nrr: {...}, expansion: {...}, retention: {...}}
+            for sub_key, sub in tier.items():
+                if not isinstance(sub, dict):
+                    continue
+                for k in ["churned_accounts", "expansion_accounts", "contraction_accounts", "all_expanders", "new_mrr_accounts"]:
+                    if sub.get(k) and isinstance(sub[k], list):
+                        priority_lists.append(sub[k])
 
     # Upsell
     upsell = d1.get("upsell_potential", {}) or {}
