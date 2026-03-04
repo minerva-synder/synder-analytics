@@ -2302,7 +2302,7 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
-def _enrich_all_accounts_with_csm(result, max_orgs=300):
+def _enrich_all_accounts_with_csm(result, max_orgs=500):
     """Enrich the most important account lists with CSM names from HubSpot.
     Only processes high-priority lists to avoid timeouts (max_orgs per request).
     """
@@ -2362,9 +2362,9 @@ def _enrich_all_accounts_with_csm(result, max_orgs=300):
     for k in ["churned_accounts", "expansion_mrr_accounts", "new_mrr_accounts"]:
         if ret.get(k): priority_lists.append(ret[k])
 
-    # Collect unique org_ids across all priority lists (up to max_orgs)
-    all_org_ids = []
+    # Collect ALL unique org_ids across all lists, then lookup up to max_orgs
     seen = set()
+    all_org_ids = []
     for lst in priority_lists:
         for item in (lst or []):
             if isinstance(item, dict):
@@ -2372,10 +2372,7 @@ def _enrich_all_accounts_with_csm(result, max_orgs=300):
                 if oid and oid not in seen:
                     seen.add(oid)
                     all_org_ids.append(oid)
-                    if len(all_org_ids) >= max_orgs:
-                        break
-        if len(all_org_ids) >= max_orgs:
-            break
+    all_org_ids = all_org_ids[:max_orgs]
 
     if not all_org_ids:
         return result
