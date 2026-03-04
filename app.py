@@ -2737,7 +2737,8 @@ def upsell_potential(mrr):
 
     # Tenure from first_paid_date (if available from Retool)
     if "first_paid_date" in essential.columns:
-        essential["_tenure_days"] = (pd.Timestamp.now() - pd.to_datetime(essential["first_paid_date"], errors="coerce")).dt.days
+        fpd = pd.to_datetime(essential["first_paid_date"], errors="coerce", utc=True).dt.tz_localize(None)
+        essential["_tenure_days"] = (pd.Timestamp.now() - fpd).dt.days
         essential["_tenure_days"] = essential["_tenure_days"].fillna(0)
     else:
         essential["_tenure_days"] = 0
