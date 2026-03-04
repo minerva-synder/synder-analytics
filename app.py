@@ -2491,7 +2491,7 @@ def csm_lookup():
         api_key = get_hubspot_api_key()
         if not api_key:
             # Return "Not assigned" for all when no API key
-            return jsonify({"results": {str(oid): "Not assigned" for oid in org_ids}})
+            return jsonify({"results": {str(oid): "Not assigned" for oid in org_ids}, "debug": "no_api_key"})
 
         cache = {}
         results = {}
