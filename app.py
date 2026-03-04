@@ -2061,8 +2061,9 @@ def fetch_data():
     """Fetch live data from Retool Workflow webhook and run analysis."""
     try:
         # Read date range from query params
-        start_date = request.args.get("start") or request.json.get("start") if request.is_json else request.args.get("start")
-        end_date = request.args.get("end") or request.json.get("end") if request.is_json else request.args.get("end")
+        _json_body = request.get_json(silent=True) or {}
+        start_date = request.args.get("start") or _json_body.get("start")
+        end_date = request.args.get("end") or _json_body.get("end")
         payload = {}
         if start_date: payload["start_date"] = start_date
         if end_date: payload["end_date"] = end_date
@@ -2074,6 +2075,8 @@ def fetch_data():
         except Exception as e:
             rows = []
             webhook_error = str(e)
+            import traceback as _tb
+            print(f"[fetch-data] Retool webhook error: {e}\n{_tb.format_exc()}", flush=True)
         else:
             webhook_error = None
 
