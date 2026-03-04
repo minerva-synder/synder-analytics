@@ -783,7 +783,7 @@ function renderExpansion(exp) {
     metricCard('New MRR', fmt(exp.new_mrr_total), num(exp.new_mrr_count) + ' new accounts', 'blue', 'new_mrr_all');
 
   expansionData = exp.top_expanders;
-  $('expansionTable').innerHTML = renderTable(exp.top_expanders, [
+  const expCols = [
     {key:'org_name', label:'Organization', fmt: (v, row) => {
       const oid = row && row.org_id ? String(row.org_id).trim() : '';
       const name = esc(v || '');
@@ -791,10 +791,16 @@ function renderExpansion(exp) {
       const url = `https://go.synder.com/organizations/view/${encodeURIComponent(oid)}`;
       return `<a href="${url}" target="_blank" rel="noopener noreferrer">${name}</a>`;
     }},
+    {key:'csm', label:'CSM'},
     {key:'starting_mrr', label:'Starting MRR', fmt: v => fmt(parseFloat(v))},
     {key:'current_mrr', label:'Current MRR', fmt: v => fmt(parseFloat(v))},
     {key:'delta', label:'Delta', fmt: v => fmt(parseFloat(v))},
-  ], { tableId: 'tbl_expansion_mrr', sortable: true });
+  ];
+  $('expansionTable').innerHTML = renderTable(exp.top_expanders, expCols, { tableId: 'tbl_expansion_mrr', sortable: true });
+  // Enrich with CSM names
+  enrichRowsWithCSM(exp.top_expanders, () => {
+    $('expansionTable').innerHTML = renderTable(exp.top_expanders, expCols, { tableId: 'tbl_expansion_mrr', sortable: true });
+  });
 }
 
 function renderNrrTouchTier(elId, data, prefix) {
@@ -1257,9 +1263,34 @@ function showDetails(key) {
   modal.show();
 
   // Auto-enrich with CSM names for high/med touch modals
-  if (key.startsWith('hm_') || key.startsWith('ntt_hm')) {
+  if (key.startsWith('hm_') || key.startsWith('ntt_hm') || key.startsWith('ett_hm') ||
+      key === 'nrr_churned' || key === 'nrr_churn_plus_contr' || key === 'nrr_expanders' ||
+      key === 'ret_churned' || key === 'ret_expansion_mrr' || key === 'exp_all' || key === 'new_mrr_all') {
     enrichWithCSM(d.rows, key);
   }
+}
+
+async function enrichRowsWithCSM(rows, onDone) {
+  if (!rows || !rows.length) return;
+  const orgIds = rows.map(r => r.org_id).filter(Boolean);
+  if (!orgIds.length) return;
+  try {
+    const resp = await fetch('/api/csm-lookup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({org_ids: orgIds})
+    });
+    const data = await resp.json();
+    if (!data.results) return;
+    rows.forEach(r => {
+      if (r.org_id && data.results[String(r.org_id)]) {
+        r.csm = data.results[String(r.org_id)];
+      } else {
+        r.csm = r.csm || 'Not assigned';
+      }
+    });
+    if (onDone) onDone();
+  } catch(e) { console.warn('CSM lookup failed:', e); }
 }
 
 async function enrichWithCSM(rows, key) {

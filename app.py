@@ -26,24 +26,44 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 # ---------------------------------------------------------------------------
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "AdminSynderAnalytics!"
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# Persist config to Railway volume if available, else local file
+_VOLUME_CONFIG = "/data/config.json"
+_LOCAL_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CONFIG_FILE = _VOLUME_CONFIG if os.path.isdir("/data") else _LOCAL_CONFIG
 
 
 def load_config():
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    # Try volume path first, then local fallback
+    for path in [_VOLUME_CONFIG, _LOCAL_CONFIG]:
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return {}
 
 
 def save_config(cfg):
+    # Write to primary config file
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
 
+_hubspot_key_cache = None
+
 def get_hubspot_api_key():
-    return os.environ.get("HUBSPOT_API_KEY", "") or load_config().get("hubspot_api_key", "")
+    global _hubspot_key_cache
+    if _hubspot_key_cache:
+        return _hubspot_key_cache
+    key = os.environ.get("HUBSPOT_API_KEY", "") or load_config().get("hubspot_api_key", "")
+    if key:
+        _hubspot_key_cache = key
+    return key
+
+def set_hubspot_api_key(key):
+    global _hubspot_key_cache
+    _hubspot_key_cache = key
 
 def get_retool_config():
     cfg = load_config()
@@ -1586,7 +1606,10 @@ def admin_settings():
     saved = False
     if request.method == "POST":
         cfg = load_config()
-        cfg["hubspot_api_key"] = request.form.get("hubspot_api_key", "").strip()
+        hs_key = request.form.get("hubspot_api_key", "").strip()
+        cfg["hubspot_api_key"] = hs_key
+        if hs_key:
+            set_hubspot_api_key(hs_key)  # Cache in memory so it survives config file loss
         cfg["retool_url"] = request.form.get("retool_url", "https://synder.retool.com").strip()
         cfg["retool_email"] = request.form.get("retool_email", "").strip()
         retool_pw = request.form.get("retool_password", "").strip()
