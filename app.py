@@ -2100,8 +2100,28 @@ def fetch_data():
                 start_rows = end_rows  # fallback: same as end
 
             # Merge start + end into the format build_dataframes_from_rows expects
-            start_by_id = {str(r.get("org_id", "")): r for r in start_rows}
-            end_by_id = {str(r.get("org_id", "")): r for r in end_rows}
+            # Orgs may have multiple rows (base plan + add-ons). Keep the one with highest MRR
+            # as primary, and sum all MRRs for total.
+            def _dedup_by_id(row_list):
+                """Group rows by org_id: keep highest-MRR plan as primary, sum total MRR."""
+                groups = {}
+                for r in row_list:
+                    oid = str(r.get("org_id", ""))
+                    if oid not in groups:
+                        groups[oid] = []
+                    groups[oid].append(r)
+                result = {}
+                for oid, rlist in groups.items():
+                    # Pick the row with highest MRR as primary (that's the base plan)
+                    primary = max(rlist, key=lambda x: float(x.get("mrr", 0) or 0))
+                    total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
+                    primary = dict(primary)
+                    primary["mrr"] = total_mrr
+                    result[oid] = primary
+                return result
+
+            start_by_id = _dedup_by_id(start_rows)
+            end_by_id = _dedup_by_id(end_rows)
             all_ids = set(start_by_id.keys()) | set(end_by_id.keys())
 
             snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
