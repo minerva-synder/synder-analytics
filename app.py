@@ -2150,7 +2150,12 @@ def fetch_data():
                 snap = end_rows[0].get("snapshot_date", "")
                 try:
                     end_dt = datetime.fromisoformat(snap.replace("Z", "+00:00")) if snap else datetime.utcnow()
-                    start_date = (end_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+                    # Use 1st of previous month as start date (not end - 30 days)
+                    if end_dt.month == 1:
+                        start_dt = end_dt.replace(year=end_dt.year - 1, month=12, day=1)
+                    else:
+                        start_dt = end_dt.replace(month=end_dt.month - 1, day=1)
+                    start_date = start_dt.strftime("%Y-%m-%d")
                 except Exception:
                     start_date = None
 
