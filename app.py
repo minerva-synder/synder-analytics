@@ -2239,60 +2239,101 @@ def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
     }
 
 
-def _enrich_all_accounts_with_csm(result):
-    """Walk the entire result dict and enrich any account list with CSM names from HubSpot."""
+def _enrich_all_accounts_with_csm(result, max_orgs=150):
+    """Enrich the most important account lists with CSM names from HubSpot.
+    Only processes high-priority lists to avoid timeouts (max_orgs per request).
+    """
     api_key = get_hubspot_api_key()
     if not api_key:
         return result
 
-    # Collect all unique org_ids first
-    all_org_ids = set()
+    # Extract high-priority account lists to enrich
+    d1 = result.get("dashboard1", {})
+    d2 = result.get("dashboard2", {})
+    sb = d1.get("sandbox_cohort", {}) or {}
 
-    def _collect_ids(obj):
-        if isinstance(obj, list):
-            for item in obj:
-                if isinstance(item, dict) and "org_id" in item:
-                    oid = str(item.get("org_id", "")).strip()
-                    if oid:
-                        all_org_ids.add(oid)
-                elif isinstance(item, dict):
-                    _collect_ids(item)
-        elif isinstance(obj, dict):
-            for v in obj.values():
-                _collect_ids(v)
+    priority_lists = []
+    # Expansion
+    exp = d1.get("expansion", {}) or {}
+    if exp.get("top_expanders"): priority_lists.append(exp["top_expanders"])
+    if exp.get("all_expanders"): priority_lists.append(exp["all_expanders"])
 
-    _collect_ids(result)
+    # NRR
+    nrr = d1.get("nrr", {}) or {}
+    for k in ["churned_accounts", "expansion_accounts", "contraction_accounts"]:
+        if nrr.get(k): priority_lists.append(nrr[k])
+
+    # Churn prediction
+    cp = d2.get("churn_prediction", {}) or {}
+    if cp.get("accounts"): priority_lists.append(cp["accounts"])
+
+    # At-risk
+    ar = d2.get("at_risk", {}) or {}
+    if ar.get("accounts"): priority_lists.append(ar["accounts"])
+
+    # Sandbox
+    for sec in ["F_not_syncing", "G_cancelled_will_churn"]:
+        s = sb.get(sec, {}) or {}
+        if s.get("accounts"): priority_lists.append(s["accounts"])
+
+    # Sandbox B churn
+    b = sb.get("B_churn_downgrade", {}) or {}
+    if b.get("churned_accounts"): priority_lists.append(b["churned_accounts"])
+
+    # Cohort data expansion/churn account lists
+    cd = d1.get("cohort_data", {}) or {}
+    for tier_group in [cd.get("cohorts", {}), cd.get("nrr_by_touch", {}), cd.get("expansion_by_touch", {})]:
+        for tier in (tier_group or {}).values():
+            if not isinstance(tier, dict): continue
+            for sub in tier.values():
+                if not isinstance(sub, dict): continue
+                for k in ["churned_accounts", "expansion_accounts", "all_expanders", "new_mrr_accounts"]:
+                    if sub.get(k): priority_lists.append(sub[k])
+
+    # Upsell
+    upsell = d1.get("upsell_potential", {}) or {}
+    if upsell.get("candidates"): priority_lists.append(upsell["candidates"])
+
+    # Retention
+    ret = d1.get("retention", {}) or {}
+    for k in ["churned_accounts", "expansion_mrr_accounts", "new_mrr_accounts"]:
+        if ret.get(k): priority_lists.append(ret[k])
+
+    # Collect unique org_ids across all priority lists (up to max_orgs)
+    all_org_ids = []
+    seen = set()
+    for lst in priority_lists:
+        for item in (lst or []):
+            if isinstance(item, dict):
+                oid = str(item.get("org_id", "")).strip()
+                if oid and oid not in seen:
+                    seen.add(oid)
+                    all_org_ids.append(oid)
+                    if len(all_org_ids) >= max_orgs:
+                        break
+        if len(all_org_ids) >= max_orgs:
+            break
 
     if not all_org_ids:
         return result
 
-    # Batch lookup all org_ids
+    # Batch lookup
     hs_cache = {}
     csm_map = {}
     for oid in all_org_ids:
         hs = hubspot_lookup_org(oid, api_key, hs_cache)
         csm_map[oid] = hs.get("csm", "Not assigned")
 
-    # Walk again and set csm field
-    def _set_csm(obj):
-        if isinstance(obj, list):
-            for item in obj:
-                if isinstance(item, dict) and "org_id" in item:
-                    oid = str(item.get("org_id", "")).strip()
-                    if oid and oid in csm_map:
-                        item["csm"] = csm_map[oid]
-                    elif "csm" not in item:
-                        item["csm"] = "Not assigned"
-                    # Also ensure synder_url exists
-                    if "synder_url" not in item and oid:
+    # Apply to all priority lists
+    for lst in priority_lists:
+        for item in (lst or []):
+            if isinstance(item, dict) and "org_id" in item:
+                oid = str(item.get("org_id", "")).strip()
+                if oid:
+                    item["csm"] = csm_map.get(oid, "Not assigned")
+                    if "synder_url" not in item:
                         item["synder_url"] = synder_org_url(oid)
-                elif isinstance(item, dict):
-                    _set_csm(item)
-        elif isinstance(obj, dict):
-            for v in obj.values():
-                _set_csm(v)
 
-    _set_csm(result)
     return result
 
 
