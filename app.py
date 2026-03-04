@@ -148,7 +148,7 @@ def hubspot_lookup_org(org_id, api_key, cache):
     """Look up CSM and custom configs for an org. Returns dict with csm and custom_configurations."""
     org_id_str = str(org_id).strip() if org_id else ""
     if not org_id_str or not api_key:
-        return {"csm": "N/A", "custom_configurations": ""}
+        return {"csm": "Not assigned", "custom_configurations": ""}
 
     cache_key = f"org_{org_id_str}"
     if cache_key in cache:
@@ -156,7 +156,7 @@ def hubspot_lookup_org(org_id, api_key, cache):
 
     props = hubspot_search_company_by_org_id(org_id_str, api_key)
 
-    result = {"csm": "N/A", "custom_configurations": ""}
+    result = {"csm": "Not assigned", "custom_configurations": ""}
     if props:
         owner_id = props.get("hubspot_owner_id")
         if owner_id:
@@ -165,7 +165,7 @@ def hubspot_lookup_org(org_id, api_key, cache):
                 result["csm"] = cache[owner_cache_key]
             else:
                 name = hubspot_get_owner_name(owner_id, api_key)
-                result["csm"] = name or "N/A"
+                result["csm"] = name or "Not assigned"
                 cache[owner_cache_key] = result["csm"]
         result["custom_configurations"] = props.get("custom_configurations", "") or ""
 
@@ -191,7 +191,7 @@ MEDIUM_TOUCH = {"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"}
 NRR_PLANS = HIGH_TOUCH | MEDIUM_TOUCH
 
 # Retention cohorts (SCALE is low touch per Valentina)
-COHORT_HIGH_MED = {"PRO", "PREMIUM", "LARGE", "SMALL_ENTERPRISE", "PRO_SPLIT_LICENSE", "PREMIUM_SPLIT_LICENSE"}
+COHORT_HIGH_MED = HIGH_TOUCH | MEDIUM_TOUCH  # ALL Premium + Pro variants (was missing PREMIUM_SPLIT, PREM_SPLIT, PRO_SPLIT)
 COHORT_ESSENTIAL = {"ESSENTIAL", "SCALE"}
 COHORT_BASIC = {"STARTER", "MEDIUM", "SMALL"}
 
@@ -366,19 +366,44 @@ def detect_wide_format(df):
 
     # For churn drill-down: last non-zero MRR inside the period (more accurate than start_mrr when the account churns mid-period)
     amount_pairs = amount_dates  # list of (date_str, col)
-    def last_active(row):
-        for ds, col in reversed(amount_pairs):
+
+    # Also capture last active plan (needed for correct cohort assignment on churn)
+    plan_amount_triples = []
+    for ds, pcol in plan_dates:
+        # Find matching amount column for this date
+        for ads, acol in amount_dates:
+            if ads == ds:
+                plan_amount_triples.append((ds, pcol, acol))
+                break
+
+    def last_active_with_plan(row):
+        for ds, pcol, acol in reversed(plan_amount_triples):
             try:
-                v = float(row.get(col, 0) or 0)
+                v = float(row.get(acol, 0) or 0)
             except Exception:
                 v = 0
             if v and v > 0:
-                return v, ds
-        return 0.0, None
+                return v, ds, str(row.get(pcol, "") or "")
+        return 0.0, None, None
 
-    la = df.apply(last_active, axis=1, result_type='expand')
-    result["last_active_mrr"] = pd.to_numeric(la[0], errors="coerce").fillna(0)
-    result["last_active_date"] = la[1]
+    if plan_amount_triples:
+        lap = df.apply(last_active_with_plan, axis=1, result_type='expand')
+        result["last_active_mrr"] = pd.to_numeric(lap[0], errors="coerce").fillna(0)
+        result["last_active_date"] = lap[1]
+        result["last_active_plan"] = lap[2]
+    else:
+        def last_active(row):
+            for ds, col in reversed(amount_pairs):
+                try:
+                    v = float(row.get(col, 0) or 0)
+                except Exception:
+                    v = 0
+                if v and v > 0:
+                    return v, ds
+            return 0.0, None
+        la = df.apply(last_active, axis=1, result_type='expand')
+        result["last_active_mrr"] = pd.to_numeric(la[0], errors="coerce").fillna(0)
+        result["last_active_date"] = la[1]
 
     # Use Diff column if available
     diff_col = col_find(df, ["Diff", "diff", "delta", "delta_mrr"])
@@ -589,6 +614,10 @@ ORGS_MAP = {
     "cancelled_syncs": ["cancelled_syncs", "canceled_syncs", "canceled_sync_count", "canceled syncs"],
     "rule_failed_syncs": ["rule_failed_syncs", "rule_failed_sync_count", "rule failed syncs"],
     "last_sync_date": ["last_sync_date", "last_sync_creation_date", "last_sync", "last sync creation date"],
+    "syncs_current_cycle": ["syncs_current_cycle", "current_cycle_syncs", "syncs_this_cycle", "billing_cycle_syncs"],
+    "migrated_to": ["migrated_to"],
+    "migrated_from": ["migrated_from"],
+    "migration_org_id": ["migration_org_id"],
     "touch": ["touch", "touch_tier", "touch_model"],
     "mrr": ["mrr", "mrr_feb24", "mrr_current", "current_mrr", "sub amount", "sub_amount"],
 }
@@ -699,15 +728,66 @@ def enrich_sandbox(sb, mrr, orgs):
     sb_now = mrr[mrr["_ep"].apply(is_sandbox)].copy()
     if "org_id" not in orgs.columns or "org_id" not in sb_now.columns:
         return sb
-    m = sb_now.merge(orgs, on="org_id", how="left", suffixes=("", "_o"))
+
+    # Also consider orgs whose plan normalizes to sandbox (catch case-sensitive/space variants)
+    sb_now_direct = mrr[mrr["_ep"].apply(is_sandbox)].copy()
+    # Include all sandbox orgs from orgs CSV too
+    orgs_c = orgs.copy()
+    orgs_c["_oid"] = orgs_c["org_id"].astype(str)
+
+    m = sb_now_direct.merge(orgs, on="org_id", how="left", suffixes=("", "_o"))
     today = pd.Timestamp.now().normalize()
+
+    api_key = get_hubspot_api_key()
+    hs_cache = {}
+
+    def _enrich_accounts(rows_df, extra_cols=None):
+        """Build account list with CSM and Synder URL."""
+        accts = []
+        for _, r in rows_df.iterrows():
+            oid = str(r.get("org_id", ""))
+            acc = {
+                "org_id": oid,
+                "synder_url": synder_org_url(oid),
+                "org_name": r.get("org_name", ""),
+                "mrr": money(r.get("_em", 0)),
+            }
+            if extra_cols:
+                for ec in extra_cols:
+                    acc[ec] = r.get(ec, None)
+            if api_key and oid:
+                hs = hubspot_lookup_org(oid, api_key, hs_cache)
+                acc["csm"] = hs["csm"]
+            else:
+                acc["csm"] = "Not assigned"
+            accts.append(acc)
+        return accts
 
     if "total_syncs" in m.columns:
         ts = pd.to_numeric(m["total_syncs"], errors="coerce").fillna(0)
         ns = m[ts == 0]
+        # Validation: if all accounts have 0 total_syncs, that's suspicious — may indicate
+        # total_syncs column is not populated in this CSV (all zeros ≠ truly not syncing)
+        total_sb = len(m)
+        ns_count = len(ns)
+        warnings_f = []
+        if total_sb > 0 and ns_count == total_sb:
+            warnings_f.append("All sandbox accounts show 0 total_syncs — this column may not be populated in your CSV. "
+                               "Try adding total_syncs data from Retool.")
         sb["F_not_syncing"] = {
-            "count": len(ns), "mrr": money(_s(ns, "_em")),
-            "accounts": ns[["org_id", "org_name", "_em"]].rename(columns={"_em": "mrr"}).head(50).to_dict("records"),
+            "count": ns_count, "mrr": money(_s(ns, "_em")),
+            "accounts": _enrich_accounts(ns.head(50)),
+            "total_sandbox_count": total_sb,
+            "validation_warnings": warnings_f,
+        }
+    else:
+        # If no total_syncs column, show all current sandbox orgs as potentially not syncing
+        sb["F_not_syncing"] = {
+            "count": len(sb_now_direct), "mrr": money(_s(sb_now_direct, "_em")),
+            "accounts": _enrich_accounts(sb_now_direct.head(50)),
+            "total_sandbox_count": len(sb_now_direct),
+            "validation_warnings": ["total_syncs column not found in CSV — showing all sandbox accounts. "
+                                     "Add total_syncs data to filter to non-syncing only."],
         }
 
     if "cancellation_date" in m.columns and "subscription_end_date" in m.columns:
@@ -716,17 +796,22 @@ def enrich_sandbox(sb, mrr, orgs):
         wc = m[(m["_cd"].notna()) & (m["_se"] > today)]
         sb["G_cancelled_will_churn"] = {
             "count": len(wc), "mrr_at_risk": money(_s(wc, "_em")),
-            "accounts": wc[["org_id", "org_name", "_em", "_se"]].rename(
-                columns={"_em": "mrr", "_se": "subscription_end_date"}
-            ).head(50).to_dict("records"),
+            "accounts": _enrich_accounts(wc.head(50), extra_cols=["subscription_end_date"]),
         }
     return sb
 
 
 def is_sub_migrated(row):
-    """Return True if org was subscription-migrated (trial_expired latest sub) — exclude from churn."""
-    lss = str(row.get("latest_sub_status", "") or "").upper()
-    return lss == "TRIAL_EXPIRED"
+    """Return True if org was subscription-migrated — exclude from churn.
+    We no longer use TRIAL_EXPIRED alone because it also captures real trial expirations
+    (actual churn events). Instead require explicit migration fields from Retool DB."""
+    # Check for explicit migration fields from Retool DB
+    migrated_to = str(row.get("migrated_to", "") or "").strip()
+    migrated_from = str(row.get("migrated_from", "") or "").strip()
+    migration_org_id = str(row.get("migration_org_id", "") or "").strip()
+    if migrated_to or migrated_from or migration_org_id:
+        return True
+    return False
 
 
 def nrr_analysis(mrr):
@@ -735,10 +820,18 @@ def nrr_analysis(mrr):
     # - exclude new MRR (start_mrr == 0)
     # - exclude sandbox plans
     cohort = mrr[(mrr["_sp"].isin(NRR_PLANS)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
-    # Exclude orgs that ended on a sandbox plan — they belong in the sandbox cohort, not here
-    cohort = cohort[~cohort["_ep"].apply(is_sandbox)].copy()
+    # Cohort assignment: use last active plan before churn.
+    # If last plan was sandbox → belongs in sandbox cohort, not NRR.
+    # Use last_active_plan column if available (from wide-format CSV), else fall back to _ep.
+    if "last_active_plan" in cohort.columns:
+        cohort["_last_plan"] = cohort["last_active_plan"].apply(norm_plan)
+    else:
+        cohort["_last_plan"] = cohort["_ep"]
+    # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
+    cohort = cohort[~cohort["_last_plan"].apply(is_sandbox)].copy()
     if cohort.empty:
-        return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": []}
+        return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": [],
+                "validation_warnings": ["NRR cohort is empty — check that NRR_PLANS includes your plan types and start_mrr > 0"]}
 
     starting = _s(cohort, "_sm")
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
@@ -785,6 +878,21 @@ def nrr_analysis(mrr):
         nrr_reasons = [v for v in nrr_cancel_vals if v]
         nrr_cancel_reason_summary = dict(Counter(nrr_reasons).most_common(10))
 
+    # Validation: warn if churn_mrr is 0 but there are churned accounts
+    nrr_validation_warnings = []
+    churned_count_nrr = int(cohort["_churned"].sum())
+    if churned_count_nrr > 0 and churn == 0:
+        nrr_validation_warnings.append(
+            f"WARNING: {churned_count_nrr} orgs marked as churned but churn_mrr=$0. "
+            "This may indicate start_mrr is not populated for churned orgs, or "
+            "the start/end snapshots are identical (Retool returning current-only data)."
+        )
+    if cohort["_sm"].sum() > 0 and churn == 0 and churned_count_nrr > 0:
+        nrr_validation_warnings.append(
+            "Tip: If using Retool data, ensure the workflow SQL filters by target_date "
+            "to return historical snapshots, not just current active subscriptions."
+        )
+
     return {
         "nrr_pct": round(safe_div(retained, starting) * 100, 2) if safe_div(retained, starting) else None,
         "starting_mrr": money(starting), "ending_mrr": money(retained),
@@ -795,6 +903,8 @@ def nrr_analysis(mrr):
         "cancel_reason_summary": nrr_cancel_reason_summary,
         "expansion_accounts": exp_accts,
         "contraction_accounts": contr_accts,
+        "validation_warnings": nrr_validation_warnings,
+        "churned_count": churned_count_nrr,
     }
 
 
@@ -919,8 +1029,13 @@ def cohort_nrr_analysis(mrr, plan_set, label=""):
     """Run NRR analysis filtered to orgs whose start plan is in plan_set."""
     mrr = prepare_mrr(mrr)
     cohort = mrr[(mrr["_sp"].isin(plan_set)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
-    # Exclude orgs that ended on sandbox — they belong in the sandbox cohort
-    cohort = cohort[~cohort["_ep"].apply(is_sandbox)].copy()
+    # Cohort assignment: use last active plan before churn (last_active_plan if available, else _ep)
+    if "last_active_plan" in cohort.columns:
+        cohort["_last_plan"] = cohort["last_active_plan"].apply(norm_plan)
+    else:
+        cohort["_last_plan"] = cohort["_ep"]
+    # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
+    cohort = cohort[~cohort["_last_plan"].apply(is_sandbox)].copy()
     if cohort.empty:
         return {"label": label, "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
                 "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
@@ -1170,11 +1285,12 @@ def churn_prediction(mrr, orgs):
     valid_cols = [c for c in cols if c in wc.columns]
     accounts = wc.sort_values("days_to_churn")[valid_cols].head(100).to_dict("records")
 
-    # HubSpot CSM lookup + sandbox detection
+    # HubSpot CSM lookup + sandbox detection + Synder URL
     api_key = get_hubspot_api_key()
     hs_cache = {}
     for acc in accounts:
-        oid = acc.get("org_id", "")
+        oid = str(acc.get("org_id", ""))
+        acc["synder_url"] = synder_org_url(oid)
         if api_key and oid:
             hs = hubspot_lookup_org(oid, api_key, hs_cache)
             acc["csm"] = hs["csm"]
@@ -1183,7 +1299,7 @@ def churn_prediction(mrr, orgs):
                 if plan.upper() in ("PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE"):
                     acc["plan_display"] = "Sandbox"
         else:
-            acc["csm"] = "N/A"
+            acc["csm"] = "Not assigned"
 
     return {
         "total_count": len(wc), "total_mrr_at_risk": money(wc["mrr"].sum()),
@@ -1208,6 +1324,7 @@ def churn_from_mrr(mrr):
         oid = str(r.get("org_id", ""))
         acc = {
             "org_id": oid,
+            "synder_url": synder_org_url(oid),
             "org_name": r.get("org_name", ""),
             "plan_display": r.get("_sp", ""),
             "mrr": money(r["_sm"]),
@@ -1219,7 +1336,7 @@ def churn_from_mrr(mrr):
             hs = hubspot_lookup_org(oid, api_key, hs_cache)
             acc["csm"] = hs["csm"]
         else:
-            acc["csm"] = "N/A"
+            acc["csm"] = "Not assigned"
         accounts.append(acc)
 
     return {
@@ -1258,7 +1375,7 @@ def at_risk_analysis(mrr, orgs):
     f["_cd"] = parse_dates(f["cancellation_date"]) if "cancellation_date" in f.columns else pd.NaT
     f["_se"] = parse_dates(f["subscription_end_date"]) if "subscription_end_date" in f.columns else pd.NaT
 
-    for c in ["total_syncs", "finished_syncs", "failed_syncs", "cancelled_syncs", "rule_failed_syncs"]:
+    for c in ["total_syncs", "finished_syncs", "failed_syncs", "cancelled_syncs", "rule_failed_syncs", "syncs_current_cycle"]:
         f[f"_{c}"] = pd.to_numeric(f[c], errors="coerce").fillna(0) if c in f.columns else 0
 
     def intv(row):
@@ -1306,9 +1423,11 @@ def at_risk_analysis(mrr, orgs):
     api_key = get_hubspot_api_key()
     hs_cache = {}
     for _, r in ar.head(100).iterrows():
+        oid = str(r.get("org_id", ""))
         acc = {
             "org_name": r.get("org_name", ""),
-            "org_id": r.get("org_id", ""),
+            "org_id": oid,
+            "synder_url": synder_org_url(oid),
             "plan_name": r.get("_pn", ""),
             "tier": r["_touch"],
             "mrr": r["_mrr"],
@@ -1317,16 +1436,16 @@ def at_risk_analysis(mrr, orgs):
             "last_sync_date": str(r["_ls"].date()) if pd.notna(r["_ls"]) else None,
             "days_since_last_sync": int(r["_days_since"]) if pd.notna(r["_days_since"]) else None,
             "sync_volume_total": int(r["_total_syncs"]),
+            "syncs_current_cycle": int(r["_syncs_current_cycle"]) if pd.notna(r.get("_syncs_current_cycle", 0)) else 0,
             "failure_ratio": round(float(r["_fr"]), 3) if pd.notna(r["_fr"]) else None,
             "risk_reasons": ", ".join(r["_rr"]),
             "in_grace_window": "yes" if r["_grace"] else "no",
         }
-        oid = acc["org_id"]
         if api_key and oid:
             hs = hubspot_lookup_org(oid, api_key, hs_cache)
             acc["csm"] = hs["csm"]
         else:
-            acc["csm"] = "N/A"
+            acc["csm"] = "Not assigned"
         accounts.append(acc)
 
     return {"total_at_risk": len(ar), "accounts": accounts, "warnings": []}
@@ -2245,11 +2364,29 @@ def fetch_data():
             snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
             snapshot_start_date = start_rows[0].get("snapshot_date", "") if start_rows else ""
 
+            # Also fetch sync health data (subscription + sync details for at-risk analysis)
+            sync_health_by_id = {}
+            for qname in ["org_sync_health", "sync_health", "organization_health", "org_health"]:
+                try:
+                    raw_sync = fetch_retool_webhook(qname)
+                    if not (isinstance(raw_sync, dict) and raw_sync.get("error")):
+                        sync_rows = _extract_rows_from_retool_response(raw_sync)
+                        if sync_rows:
+                            for sr in sync_rows:
+                                sid = str(sr.get("org_id", "")).strip()
+                                if sid:
+                                    sync_health_by_id[sid] = sr
+                            print(f"[fetch-data] Loaded {len(sync_health_by_id)} sync health rows via query '{qname}'", flush=True)
+                            break
+                except Exception:
+                    continue
+
             rows = []
             for oid in all_ids:
                 s = start_by_id.get(oid, {})
                 e = end_by_id.get(oid, {})
-                rows.append({
+                sh = sync_health_by_id.get(oid, {})
+                row = {
                     "org_id": oid,
                     "org_link": (e or s).get("org_link", f"https://go.synder.com/organizations/view/{oid}"),
                     "org_name": (e or s).get("org_name", f"Org {oid}"),
@@ -2261,12 +2398,26 @@ def fetch_data():
                     "snapshot_start_date": snapshot_start_date,
                     "industry": (e or s).get("industry", ""),
                     "first_paid_date": (e or s).get("first_paid_date", ""),
-                    "total_syncs": (e or s).get("total_syncs", 0),
-                    "subscription_end_date": (e or s).get("subscription_end_date", ""),
-                    "cancellation_date": (e or s).get("cancellation_date", ""),
-                    "subscription_status": (e or s).get("subscription_status", ""),
-                    "latest_sub_status": (e or s).get("latest_sub_status", ""),
-                })
+                    "total_syncs": sh.get("total_syncs") or (e or s).get("total_syncs", 0),
+                    "subscription_end_date": sh.get("subscription_end_date") or (e or s).get("subscription_end_date", ""),
+                    "cancellation_date": sh.get("cancellation_date") or (e or s).get("cancellation_date", ""),
+                    "subscription_status": sh.get("subscription_status") or (e or s).get("subscription_status", ""),
+                    "latest_sub_status": sh.get("latest_sub_status") or (e or s).get("latest_sub_status", ""),
+                    # Sync health fields (from separate sync_health query if available)
+                    "subscription_start_date": sh.get("subscription_start_date") or (e or s).get("subscription_start_date", ""),
+                    "subscription_interval": sh.get("subscription_interval") or (e or s).get("subscription_interval", ""),
+                    "last_sync_date": sh.get("last_sync_date") or (e or s).get("last_sync_date", ""),
+                    "finished_syncs": sh.get("finished_syncs") or (e or s).get("finished_syncs", 0),
+                    "failed_syncs": sh.get("failed_syncs") or (e or s).get("failed_syncs", 0),
+                    "cancelled_syncs": sh.get("cancelled_syncs") or (e or s).get("cancelled_syncs", 0),
+                    "rule_failed_syncs": sh.get("rule_failed_syncs") or (e or s).get("rule_failed_syncs", 0),
+                    "syncs_current_cycle": sh.get("syncs_current_cycle") or sh.get("current_cycle_syncs") or (e or s).get("syncs_current_cycle", 0),
+                    # Migration fields for proper churn exclusion
+                    "migrated_to": sh.get("migrated_to") or (e or s).get("migrated_to", ""),
+                    "migrated_from": sh.get("migrated_from") or (e or s).get("migrated_from", ""),
+                    "migration_org_id": sh.get("migration_org_id") or (e or s).get("migration_org_id", ""),
+                }
+                rows.append(row)
         except Exception as exc:
             rows = []
             webhook_error = str(exc)
@@ -2391,33 +2542,44 @@ def recalc_nrr():
 def upsell_potential(mrr):
     """Find Essential orgs likely to benefit from Pro upgrade."""
     mrr = prepare_mrr(mrr)
-    essential = mrr[mrr["_ep"] == "ESSENTIAL"].copy()
+    # Include all low-touch plans that could be upgraded to Pro
+    essential = mrr[mrr["_ep"].isin(COHORT_ESSENTIAL)].copy()
     if essential.empty:
-        return {"candidates": [], "total": 0, "total_mrr": "$0.00", "avg_score": 0}
+        # Try also checking start plan (in case the org recently changed)
+        essential = mrr[mrr["_sp"].isin(COHORT_ESSENTIAL) & (mrr["_em"] > 0)].copy()
+    if essential.empty:
+        return {"candidates": [], "total": 0, "total_mrr": 0, "avg_score": 0,
+                "debug": f"No ESSENTIAL/SCALE orgs found in {len(mrr)} rows. Plans seen: {list(mrr['_ep'].dropna().unique()[:10])}"}
 
-    # Tenure from first_paid_date
+    # Tenure from first_paid_date (if available from Retool)
     if "first_paid_date" in essential.columns:
         essential["_tenure_days"] = (pd.Timestamp.now() - pd.to_datetime(essential["first_paid_date"], errors="coerce")).dt.days
+        essential["_tenure_days"] = essential["_tenure_days"].fillna(0)
     else:
         essential["_tenure_days"] = 0
 
     essential["_score"] = 0
 
+    # Any MRR at all = at least a paying customer
+    essential.loc[essential["_em"] > 0, "_score"] += 1
+
     # High MRR for Essential (above median)
-    median_mrr = essential["_em"].median()
-    if median_mrr > 0:
+    median_mrr = essential["_em"][essential["_em"] > 0].median() if (essential["_em"] > 0).any() else 0
+    if median_mrr and median_mrr > 0:
         essential.loc[essential["_em"] > median_mrr, "_score"] += 2
 
+    # Long tenure (>90 days)
+    essential.loc[essential["_tenure_days"] > 90, "_score"] += 1
     # Long tenure (>180 days)
-    essential.loc[essential["_tenure_days"] > 180, "_score"] += 2
-
+    essential.loc[essential["_tenure_days"] > 180, "_score"] += 1
     # Very long tenure (>365 days)
     essential.loc[essential["_tenure_days"] > 365, "_score"] += 1
 
     # MRR growth
     essential.loc[essential["_em"] > essential["_sm"], "_score"] += 1
 
-    candidates = essential[essential["_score"] >= 2].sort_values("_score", ascending=False)
+    # Score threshold: 1 (any paying customer qualifies as upsell candidate)
+    candidates = essential[essential["_score"] >= 1].sort_values(["_score", "_em"], ascending=[False, False])
 
     # Build accounts list
     accts = []
@@ -2427,12 +2589,13 @@ def upsell_potential(mrr):
             "org_id": str(oid) if oid else "",
             "synder_url": synder_org_url(oid),
             "org_name": r.get("org_name", ""),
-            "end_plan": "ESSENTIAL",
+            "end_plan": str(r.get("_ep", "ESSENTIAL") or "ESSENTIAL"),
             "start_mrr": money(r.get("_sm", 0)),
             "end_mrr": money(r.get("_em", 0)),
             "tenure_days": int(r.get("_tenure_days", 0)) if pd.notna(r.get("_tenure_days", 0)) else 0,
             "score": int(r.get("_score", 0)),
             "industry": r.get("industry", ""),
+            "csm": "Not assigned",  # Will be enriched by frontend CSM lookup if needed
         })
 
     return {
@@ -2522,6 +2685,98 @@ def monthly_cohort():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/monthly-retention-cohort", methods=["GET"])
+def monthly_retention_cohort():
+    """Monthly retention cohort tables from Retool — two tables: High/Med Touch and Essential.
+    Each row = one cohort month (orgs who started that month).
+    Each column = retention at M0, M1, M2, ... up to current.
+    Uses the Retool organizations workflow with target_date params."""
+    try:
+        today = date.today().replace(day=1)
+
+        # Build list of cohort months (last 12 months)
+        cohort_months = []
+        for i in range(12, 0, -1):
+            m = (today - timedelta(days=i * 30)).replace(day=1)
+            cohort_months.append(m)
+
+        # Build list of observation months (current + past 12)
+        all_months = []
+        for i in range(13, -1, -1):
+            m = (today - timedelta(days=i * 30)).replace(day=1)
+            all_months.append(m)
+        all_months = sorted(set(all_months))
+
+        # Fetch snapshot for each observation month
+        snapshots = {}  # month_str -> set of active org_ids with plan info
+        for obs_month in all_months:
+            try:
+                raw = fetch_retool_webhook("organizations", payload={"target_date": obs_month.isoformat()})
+                rows = _extract_rows_from_retool_response(raw)
+                snap = {}
+                for r in rows:
+                    oid = str(r.get("org_id", "")).strip()
+                    plan = norm_plan(r.get("plan", r.get("end_plan", "")))
+                    mrr = float(r.get("mrr", r.get("end_mrr", 0) or 0) or 0)
+                    if oid and mrr > 0:
+                        snap[oid] = {"plan": plan, "mrr": mrr}
+                snapshots[obs_month.strftime("%Y-%m")] = snap
+            except Exception:
+                snapshots[obs_month.strftime("%Y-%m")] = {}
+
+        # For each cohort month, determine which orgs first appeared in that month
+        org_first_month = {}
+        for obs_month in all_months:
+            ms = obs_month.strftime("%Y-%m")
+            for oid in snapshots.get(ms, {}):
+                if oid not in org_first_month:
+                    org_first_month[oid] = ms
+
+        obs_month_keys = [m.strftime("%Y-%m") for m in all_months]
+
+        def build_cohort_table(plan_set, label):
+            cohort_data = []
+            for cohort_month in cohort_months:
+                cms = cohort_month.strftime("%Y-%m")
+                # Orgs whose first month is this cohort month AND whose plan is in plan_set at that time
+                snap_cm = snapshots.get(cms, {})
+                cohort_orgs = [
+                    oid for oid, info in snap_cm.items()
+                    if org_first_month.get(oid) == cms and info.get("plan") in plan_set
+                ]
+                if not cohort_orgs:
+                    continue
+                size = len(cohort_orgs)
+                cohort_set = set(cohort_orgs)
+                retentions = []
+                for obs_ms in obs_month_keys:
+                    if obs_ms < cms:
+                        continue  # Before cohort month
+                    snap_obs = snapshots.get(obs_ms, {})
+                    active = sum(1 for oid in cohort_set if oid in snap_obs)
+                    pct = round(active / size * 100, 1)
+                    retentions.append({"month": obs_ms, "count": active, "pct": pct})
+                cohort_data.append({
+                    "cohort_month": cms,
+                    "size": size,
+                    "retentions": retentions,
+                })
+            return {"label": label, "cohorts": cohort_data}
+
+        high_med_table = build_cohort_table(COHORT_HIGH_MED, "High/Med Touch")
+        essential_table = build_cohort_table(COHORT_ESSENTIAL, "Essential")
+
+        return jsonify({
+            "success": True,
+            "high_med": high_med_table,
+            "essential": essential_table,
+            "observation_months": obs_month_keys,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/csm-lookup", methods=["POST"])
 def csm_lookup():
     """Batch lookup CSM names from HubSpot for a list of org_ids."""
@@ -2542,8 +2797,8 @@ def csm_lookup():
         results = {}
         for oid in org_ids[:200]:  # Limit to 200 to avoid timeout
             lookup = hubspot_lookup_org(oid, api_key, cache)
-            csm = lookup.get("csm", "N/A")
-            results[str(oid)] = csm if csm != "N/A" else "Not assigned"
+            csm = lookup.get("csm", "Not assigned")
+            results[str(oid)] = csm if csm else "Not assigned"
 
         return jsonify({"results": results})
     except Exception as e:
