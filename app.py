@@ -2183,21 +2183,43 @@ def _extract_rows_from_retool_response(raw):
     return []
 
 
+# Simple in-memory cache to avoid re-fetching large Retool payloads repeatedly.
+# Key: (query_name, sorted(payload_items)) -> {ts, data}
+_RETOOL_CACHE = {}
+_RETOOL_CACHE_TTL_SEC = int(os.environ.get("RETOOL_CACHE_TTL_SEC", "3600"))  # default 1 hour
+
+
 def fetch_retool_webhook(query_name="organizations", payload=None):
-    """POST to Retool Workflow webhook and return raw JSON response."""
+    """POST to Retool Workflow webhook and return raw JSON response.
+
+    Note: We cache successful responses for a short TTL because the workflow payload can be large/slow.
+    """
     body = {"query_name": query_name}
     if payload:
         body.update(payload)
+
+    cache_key = (query_name, tuple(sorted((payload or {}).items())))
+    now = time.time()
+    cached = _RETOOL_CACHE.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) < _RETOOL_CACHE_TTL_SEC:
+        return cached.get("data")
+
     resp = _requests_lib.post(
         RETOOL_WORKFLOW_URL,
         json=body,
         headers={"X-Workflow-Api-Key": RETOOL_WORKFLOW_API_KEY},
-        timeout=180,
+        timeout=240,
     )
     # Don't raise here; return a structured error so the caller can surface it.
     if resp.status_code >= 400:
         return {"error": True, "status": resp.status_code, "body": resp.text[:2000]}
-    return resp.json()
+    data = resp.json()
+
+    # Cache only non-error responses
+    if not (isinstance(data, dict) and data.get("error")):
+        _RETOOL_CACHE[cache_key] = {"ts": now, "data": data}
+
+    return data
 
 
 def build_dataframes_from_rows(rows):
