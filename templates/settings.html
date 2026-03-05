@@ -44,7 +44,12 @@ body { background: #F8FAFC; }
     <div class="mb-3">
       <label class="form-label fw-bold">Retool Password</label>
       <input type="password" name="retool_password" class="form-control" value="" placeholder="{% if retool_has_password %}••••••••  (saved — leave blank to keep){% else %}Enter password{% endif %}">
-      <div class="form-text">Credentials are stored locally and used to fetch data from Retool. Leave password blank to keep existing.</div>
+      <div class="form-text">Stored in Railway volume config. Leave blank to keep existing.</div>
+    </div>
+    <div class="mb-3">
+      <label class="form-label fw-bold">Retool API Token</label>
+      <input type="password" name="retool_api_token" class="form-control" value="" placeholder="{% if retool_has_token %}••••••••  (saved — leave blank to keep){% else %}Paste token{% endif %}">
+      <div class="form-text">Stored in Railway volume config. Not shown after saving. Leave blank to keep existing.</div>
     </div>
     <button type="submit" class="btn btn-primary">Save Settings</button>
   </form>

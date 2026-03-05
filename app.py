@@ -1824,6 +1824,9 @@ def admin_settings():
         retool_pw = request.form.get("retool_password", "").strip()
         if retool_pw:  # Only update password if provided (don't blank it on re-save)
             cfg["retool_password"] = retool_pw
+        retool_token = request.form.get("retool_api_token", "").strip()
+        if retool_token:  # Only update token if provided
+            cfg["retool_api_token"] = retool_token
         save_config(cfg)
         saved = True
     cfg = load_config()
@@ -1832,6 +1835,7 @@ def admin_settings():
                            retool_url=cfg.get("retool_url", "https://synder.retool.com"),
                            retool_email=cfg.get("retool_email", ""),
                            retool_has_password=bool(cfg.get("retool_password", "")),
+                           retool_has_token=bool(cfg.get("retool_api_token", "")),
                            saved=saved)
 
 
