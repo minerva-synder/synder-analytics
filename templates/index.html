@@ -327,12 +327,21 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <div class="row g-3 mb-3" id="upsellCards"></div>
         <div class="table-wrapper" id="upsellTable"></div>
 
-        <!-- 2c. Monthly Retention Cohort (Pro/Premium) -->
+        <!-- 2c. Monthly Retention Cohort -->
         <div class="section-title">📊 12-Month Retention Cohort (Pro/Premium)
-          <button class="btn btn-sm btn-outline-primary ms-2" id="btnMonthlyCohort" onclick="loadMonthlyCohort()">Load</button>
+          <button class="btn btn-sm btn-outline-secondary ms-2" id="btnMonthlyCohort" onclick="loadMonthlyCohort()">↻ Refresh</button>
         </div>
-        <div id="monthlyCohortNote" class="text-muted small mb-2">Click "Load" to fetch 12 months of retention data (makes multiple API calls — may take 30-60 seconds).</div>
+        <div id="monthlyCohortNote" class="text-muted small mb-2">Loading 12-month retention data...</div>
         <div class="table-wrapper" id="monthlyCohortTable"></div>
+
+        <!-- 2d. Monthly Retention Cohort Heatmaps (High/Med Touch + Essential) -->
+        <div class="section-title">📊 Monthly Retention Cohort Heatmap — High/Med Touch</div>
+        <div id="retCohortHighMedNote" class="text-muted small mb-2">Loading...</div>
+        <div class="table-wrapper" id="retCohortHighMedTable"></div>
+
+        <div class="section-title mt-4">📊 Monthly Retention Cohort Heatmap — Essential</div>
+        <div id="retCohortEssentialNote" class="text-muted small mb-2">Loading...</div>
+        <div class="table-wrapper" id="retCohortEssentialTable"></div>
 
         <!-- 3. Growth Signals -->
         <div class="section-title">3. Business Growth Signals
@@ -625,6 +634,10 @@ function renderResults(data) {
   try { if (d2.churn_prediction) renderChurn(d2.churn_prediction); } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
   try { if (d2.at_risk) renderAtRisk(d2.at_risk); } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
   try { if (d1.upsell_potential) renderUpsell(d1.upsell_potential); } catch(e) { console.error('[Minerva] renderUpsell failed:', e); }
+
+  // ---- Auto-load monthly cohort + retention heatmaps ----
+  loadMonthlyCohort();
+  loadRetentionCohortHeatmaps();
 
   // ---- Global background CSM enrichment ----
   // Collect all org_ids from detailsStore + visible tables and fetch CSM in one batch
@@ -1217,6 +1230,60 @@ async function loadMonthlyCohort() {
   }
 }
 
+async function loadRetentionCohortHeatmaps() {
+  $('retCohortHighMedNote').textContent = 'Fetching cohort data from Retool (may take 30-60s)...';
+  $('retCohortEssentialNote').textContent = 'Loading...';
+  try {
+    const resp = await fetch('/api/monthly-retention-cohort');
+    const data = await resp.json();
+    if (data.error) {
+      $('retCohortHighMedNote').textContent = 'Error: ' + data.error;
+      $('retCohortEssentialNote').textContent = '';
+      return;
+    }
+
+    function renderCohortHeatmapTable(container, noteEl, tableData, label) {
+      if (!tableData || !tableData.cohorts || !tableData.cohorts.length) {
+        noteEl.textContent = `No ${label} cohort data available.`;
+        container.innerHTML = '<p class="text-muted small p-3">No data — either no orgs matched this cohort or snapshots are not available for the requested period.</p>';
+        return;
+      }
+      noteEl.textContent = `${label} — orgs grouped by first active month. Each cell = % still active at that observation month.`;
+      const obsMonths = data.observation_months || [];
+      // Build header row
+      let html = '<table class="table data-table table-sm"><thead><tr><th>Cohort</th><th>Size</th>';
+      // Use M0, M1, M2... as column headers
+      const maxCols = Math.max(...tableData.cohorts.map(c => c.retentions.length));
+      for (let i = 0; i < maxCols; i++) html += `<th>M${i}</th>`;
+      html += '</tr></thead><tbody>';
+      for (const cohort of tableData.cohorts) {
+        html += `<tr><td><strong>${cohort.cohort_month}</strong></td><td>${cohort.size}</td>`;
+        for (let i = 0; i < maxCols; i++) {
+          if (i < cohort.retentions.length) {
+            const r = cohort.retentions[i];
+            const pct = r.pct;
+            // Color: green for high retention, red for low
+            const bg = pct >= 90 ? '#ECFDF5' : pct >= 70 ? '#FEF9C3' : pct >= 50 ? '#FFF7ED' : '#FEF2F2';
+            html += `<td style="background:${bg};text-align:center" title="${r.count}/${cohort.size} active in ${r.month}">${pct}%</td>`;
+          } else {
+            html += '<td></td>';
+          }
+        }
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    renderCohortHeatmapTable($('retCohortHighMedTable'), $('retCohortHighMedNote'), data.high_med, 'High/Med Touch');
+    renderCohortHeatmapTable($('retCohortEssentialTable'), $('retCohortEssentialNote'), data.essential, 'Essential');
+
+  } catch(e) {
+    $('retCohortHighMedNote').textContent = 'Error: ' + e.message;
+    $('retCohortEssentialNote').textContent = '';
+  }
+}
+
 async function runGrowthSignals() {
   if (!analysisResult) return;
   $('btnGrowth').disabled = true;
@@ -1331,7 +1398,7 @@ function renderGrowthSignals(signals) {
 
 // ---- Retention Section ----
 function renderRetention(ret) {
-  if (!ret) { $('retentionCards').innerHTML = ''; return; }
+  if (!ret) { $('retentionCards').innerHTML = '<p class="text-muted small p-3">No retention data available — check that org data is loaded.</p>'; return; }
 
   setDetails('ret_churned', 'Churned orgs', ret.churned_accounts || []);
   setDetails('ret_downgraded', 'Downgraded orgs', ret.downgraded_accounts || []);
