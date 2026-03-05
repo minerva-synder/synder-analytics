@@ -2484,10 +2484,180 @@ def _trim_response(result, max_accounts=50):
                                 trim_list(v, key)
 
 
+SNAPSHOT_DIR = "/data/snapshots" if os.path.isdir("/data") else os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "latest.json")
+
+
+def _load_snapshot():
+    try:
+        with open(SNAPSHOT_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_snapshot(payload):
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    tmp = SNAPSHOT_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, SNAPSHOT_FILE)
+
+
+@app.route("/api/snapshot", methods=["GET"])
+def api_snapshot_get():
+    """Return the last stored snapshot (no Retool call)."""
+    snap = _load_snapshot()
+    if not snap:
+        return jsonify({"connecting": True, "message": "No stored snapshot yet. Ask admin to refresh."}), 200
+    return jsonify({"success": True, **snap})
+
+
+@app.route("/api/snapshot-refresh", methods=["POST"])
+def api_snapshot_refresh():
+    """Admin-triggered snapshot refresh (calls Retool once, stores on Railway volume)."""
+    auth = request.headers.get("X-Admin-Key", "")
+    if auth != "AdminSynderAnalytics!":
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        # Reuse fetch_data logic by calling it internally with force_refresh
+        res = _fetch_and_analyze_from_retool(force_refresh=True)
+        if res.get("success"):
+            _save_snapshot({"fetched_at": pd.Timestamp.now().isoformat(), "result": res})
+        return jsonify(res)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _fetch_and_analyze_from_retool(force_refresh=False):
+    """Core logic: call Retool and build analysis JSON (used by fetch-data and snapshot-refresh)."""
+    # Read date range from query params
+    _json_body = request.get_json(silent=True) or {}
+    start_date = request.args.get("start") or _json_body.get("start")
+    end_date = request.args.get("end") or _json_body.get("end")
+    payload = {}
+    if start_date: payload["start_date"] = start_date
+    if end_date: payload["end_date"] = end_date
+
+    # 1. Try Retool Workflow webhook — two fast calls (end + start), merge in Python
+    # (still potentially slow depending on workflow payload)
+    try:
+        end_payload = {"target_date": end_date} if end_date else {}
+        raw_end = fetch_retool_webhook("organizations", payload=end_payload or None)
+        if isinstance(raw_end, dict) and raw_end.get("error"):
+            raise Exception(f"Retool HTTP {raw_end.get('status')}: {raw_end.get('body','')[:500]}")
+        end_rows = _extract_rows_from_retool_response(raw_end)
+
+        if not start_date and end_rows:
+            snap = end_rows[0].get("snapshot_date", "")
+            try:
+                end_dt = datetime.fromisoformat(snap.replace("Z", "+00:00")) if snap else datetime.utcnow()
+                if end_dt.month == 1:
+                    start_dt = end_dt.replace(year=end_dt.year - 1, month=12, day=1)
+                else:
+                    start_dt = end_dt.replace(month=end_dt.month - 1, day=1)
+                start_date = start_dt.strftime("%Y-%m-%d")
+            except Exception:
+                start_date = None
+
+        if start_date:
+            raw_start = fetch_retool_webhook("organizations", payload={"target_date": start_date})
+            if isinstance(raw_start, dict) and raw_start.get("error"):
+                raise Exception(f"Retool start HTTP {raw_start.get('status')}: {raw_start.get('body','')[:500]}")
+            start_rows = _extract_rows_from_retool_response(raw_start)
+        else:
+            start_rows = end_rows
+
+        # Dedup helper (same as before)
+        def _dedup_by_id(row_list):
+            groups = {}
+            for r in row_list:
+                oid = str(r.get("org_id", ""))
+                groups.setdefault(oid, []).append(r)
+            result = {}
+            for oid, rlist in groups.items():
+                def _plan_sort_key(x):
+                    p = (x.get("plan", "") or "").upper()
+                    is_addon = p in ADDON_PLANS
+                    return (0 if not is_addon else 1, -float(x.get("mrr", 0) or 0))
+                primary = min(rlist, key=_plan_sort_key)
+                total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
+                primary = dict(primary)
+                primary["mrr"] = total_mrr
+                result[oid] = primary
+            return result
+
+        start_by_id = _dedup_by_id(start_rows)
+        end_by_id = _dedup_by_id(end_rows)
+        all_ids = set(start_by_id.keys()) | set(end_by_id.keys())
+
+        snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
+        snapshot_start_date = start_rows[0].get("snapshot_date", "") if start_rows else ""
+
+        # Build merged rows
+        rows = []
+        for oid in all_ids:
+            s = start_by_id.get(oid, {})
+            e = end_by_id.get(oid, {})
+            row = {
+                "org_id": oid,
+                "org_link": (e or s).get("org_link", f"https://go.synder.com/organizations/view/{oid}"),
+                "org_name": (e or s).get("org_name", f"Org {oid}"),
+                "end_plan": e.get("plan", ""),
+                "start_plan": s.get("plan", ""),
+                "end_mrr": float(e.get("mrr", 0) or 0),
+                "start_mrr": float(s.get("mrr", 0) or 0),
+                "snapshot_end_date": snapshot_end_date,
+                "snapshot_start_date": snapshot_start_date,
+                "industry": (e or s).get("industry", ""),
+                "first_paid_date": (e or s).get("first_paid_date", ""),
+                # Health fields (may or may not be present depending on workflow)
+                "total_syncs": (e or s).get("total_syncs", 0),
+                "subscription_end_date": (e or s).get("subscription_end_date", ""),
+                "cancellation_date": (e or s).get("cancellation_date", ""),
+                "subscription_status": (e or s).get("subscription_status", ""),
+                "latest_sub_status": (e or s).get("latest_sub_status", ""),
+                "subscription_start_date": (e or s).get("subscription_start_date", "") or (e or s).get("first_paid_date", ""),
+                "subscription_interval": (e or s).get("subscription_interval", ""),
+                "last_sync_date": (e or s).get("last_sync_date", ""),
+                "finished_syncs": (e or s).get("finished_syncs", 0),
+                "failed_syncs": (e or s).get("failed_syncs", 0),
+                "cancelled_syncs": (e or s).get("cancelled_syncs", 0),
+                "rule_failed_syncs": (e or s).get("rule_failed_syncs", 0),
+                "syncs_current_cycle": (e or s).get("syncs_current_cycle", 0),
+                "transfer_org_id": (e or s).get("transfer_org_id", ""),
+                "migrated_from": (e or s).get("migrated_from", ""),
+            }
+            rows.append(row)
+
+        mrr_df, orgs_df, warns = build_dataframes_from_rows(rows)
+        result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
+        _enrich_all_accounts_with_csm(result)
+        _trim_response(result)
+        return result
+
+    except Exception as exc:
+        import traceback as _tb
+        print(f"[fetch-data] Retool webhook error: {exc}\n{_tb.format_exc()}", flush=True)
+        return {"connecting": True, "message": f"Database connecting... ({str(exc)[:180]})"}
+
+
 @app.route("/api/fetch-data", methods=["GET", "POST"])
 def fetch_data():
-    """Fetch live data from Retool Workflow webhook and run analysis."""
+    """Default dashboard data endpoint.
+
+    Behavior:
+    - If a stored snapshot exists, return it immediately (no Retool call).
+    - Otherwise attempt live fetch from Retool (may be slow / quota-limited).
+    """
     try:
+        # 0) Prefer stored snapshot (no Retool calls)
+        snap = _load_snapshot()
+        if snap and isinstance(snap, dict) and snap.get("result"):
+            return jsonify(snap["result"])
+
+        # 1) No snapshot yet → attempt live Retool fetch (may be slow / quota-limited)
         # Read date range from query params
         _json_body = request.get_json(silent=True) or {}
         start_date = request.args.get("start") or _json_body.get("start")
@@ -2496,7 +2666,6 @@ def fetch_data():
         if start_date: payload["start_date"] = start_date
         if end_date: payload["end_date"] = end_date
 
-        # 1. Try Retool Workflow webhook — two fast calls (end + start), merge in Python
         try:
             # Fetch end-date snapshot (latest by default)
             end_payload = {"target_date": end_date} if end_date else {}
