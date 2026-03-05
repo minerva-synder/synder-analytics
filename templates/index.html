@@ -430,7 +430,8 @@ async function runFetchData() {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    // Retool-backed fetch can be slow on cold start; allow longer before aborting.
+    const timeout = setTimeout(() => controller.abort(), 300000);
     console.log('[Minerva] Starting fetch /api/fetch-data...');
     const qs = selectedPeriod ? `?start=${selectedPeriod.start}&end=${selectedPeriod.end}` : '';
     const resp = await fetch('/api/fetch-data' + qs, { signal: controller.signal });
