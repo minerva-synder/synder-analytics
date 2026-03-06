@@ -2561,24 +2561,37 @@ def api_snapshot_get():
 
 _refresh_status = {"running": False, "progress": {}, "errors": {}, "started_at": None, "finished_at": None}
 
-def _run_refresh_background(months_to_refresh):
-    """Run multi-month snapshot refresh in a background thread."""
+def _run_refresh_background(months_to_refresh, override_end_dates=None):
+    """Run snapshot refresh in a background thread.
+
+    If override_end_dates is provided, it should be a list of YYYY-MM-DD strings and we refresh exactly those months.
+    Otherwise, we refresh current month + previous (months_to_refresh-1) months.
+    """
     from datetime import datetime as _dt, timedelta
     global _refresh_status
     _refresh_status = {"running": True, "progress": {}, "errors": {}, "started_at": _dt.utcnow().isoformat(), "finished_at": None}
 
     now = _dt.utcnow()
-    for i in range(months_to_refresh):
-        if i == 0:
-            end_date = now.strftime("%Y-%m-%d")
-            month_key = now.strftime("%Y-%m")
+    end_dates_list = list(override_end_dates) if override_end_dates else [None] * months_to_refresh
+
+    for i, override_end_date in enumerate(end_dates_list):
+        if override_end_date:
+            end_date = override_end_date
+            try:
+                month_key = _dt.strptime(end_date, "%Y-%m-%d").strftime("%Y-%m")
+            except Exception:
+                month_key = pd.Timestamp.utcnow().strftime("%Y-%m")
         else:
-            target = now.replace(day=1)
-            for _ in range(i):
-                target = (target - timedelta(days=1)).replace(day=1)
-            next_month = target.replace(day=28) + timedelta(days=4)
-            end_date = (next_month - timedelta(days=next_month.day)).strftime("%Y-%m-%d")
-            month_key = target.strftime("%Y-%m")
+            if i == 0:
+                end_date = now.strftime("%Y-%m-%d")
+                month_key = now.strftime("%Y-%m")
+            else:
+                target = now.replace(day=1)
+                for _ in range(i):
+                    target = (target - timedelta(days=1)).replace(day=1)
+                next_month = target.replace(day=28) + timedelta(days=4)
+                end_date = (next_month - timedelta(days=next_month.day)).strftime("%Y-%m-%d")
+                month_key = target.strftime("%Y-%m")
 
         _refresh_status["progress"][month_key] = "running"
         print(f"[snapshot-refresh] Generating snapshot for {month_key} (end_date={end_date})...", flush=True)
@@ -2623,8 +2636,14 @@ def api_snapshot_refresh():
         months_to_refresh = int(request.args.get("months") or body.get("months", 4))
         months_to_refresh = max(1, min(months_to_refresh, 12))
 
+        # Optional: refresh a specific month only
+        override_end = request.args.get("end") or body.get("end") or body.get("end_date")
+
         import threading
-        t = threading.Thread(target=_run_refresh_background, args=(months_to_refresh,), daemon=True)
+        if override_end:
+            t = threading.Thread(target=_run_refresh_background, args=(1, [override_end]), daemon=True)
+        else:
+            t = threading.Thread(target=_run_refresh_background, args=(months_to_refresh,), daemon=True)
         t.start()
 
         return jsonify({
