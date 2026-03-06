@@ -632,9 +632,18 @@ function renderResults(data) {
   try { if (d1.cohort_data) renderCohortData(d1.cohort_data); } catch(e) { console.error('[Minerva] renderCohortData failed:', e); }
 
   // ---- Dashboard 2 ----
-  try { if (d2.churn_prediction) renderChurn(d2.churn_prediction); } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
-  try { if (d2.at_risk) renderAtRisk(d2.at_risk); } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
-  try { if (d1.upsell_potential) renderUpsell(d1.upsell_potential); } catch(e) { console.error('[Minerva] renderUpsell failed:', e); }
+  try {
+    if (d2.churn_prediction) renderChurn(d2.churn_prediction);
+    else { $('churnBuckets').innerHTML = '<p class="text-muted small p-3">No churn prediction data available for this period.</p>'; $('churnTable').innerHTML = ''; }
+  } catch(e) { console.error('[Minerva] renderChurn failed:', e); }
+  try {
+    if (d2.at_risk) renderAtRisk(d2.at_risk);
+    else { $('atRiskSummary').innerHTML = '<p class="text-muted small p-3">No at-risk accounts data available for this period.</p>'; $('atRiskTable').innerHTML = ''; }
+  } catch(e) { console.error('[Minerva] renderAtRisk failed:', e); }
+  try {
+    if (d1.upsell_potential) renderUpsell(d1.upsell_potential);
+    else { $('upsellCards').innerHTML = '<p class="text-muted small p-3">No upsell candidates found for this period.</p>'; $('upsellTable').innerHTML = ''; }
+  } catch(e) { console.error('[Minerva] renderUpsell failed:', e); }
 
   // ---- Auto-load monthly cohort + retention heatmaps ----
   loadMonthlyCohort();
@@ -788,6 +797,13 @@ async function enrichAllStoredDataWithCSM() {
 }
 
 function renderSandbox(sb) {
+  if (!sb) {
+    const empty = '<p class="text-muted small p-3">No sandbox cohort data available for this period.</p>';
+    ['sandboxCohortCards','sandboxChurnCards','sandboxProCards','sandboxNewCards','sandboxUpgradeCards'].forEach(id => { if ($(id)) $(id).innerHTML = empty; });
+    if ($('sandboxNotSyncing')) $('sandboxNotSyncing').innerHTML = empty;
+    if ($('sandboxCancelled')) $('sandboxCancelled').innerHTML = empty;
+    return;
+  }
   // A
   const a = sb.A_cohort;
   setDetails('sb_start', 'Sandbox cohort (start)', a.start_accounts || []);
@@ -874,6 +890,11 @@ function renderSandbox(sb) {
 }
 
 function renderNRR(nrr) {
+  if (!nrr) {
+    $('nrrCards').innerHTML = '<p class="text-muted small p-3">No NRR data available for this period.</p>';
+    $('nrrTable').innerHTML = '';
+    return;
+  }
   setDetails('nrr_cohort', 'NRR cohort (High + Medium touch at start)', nrr.cohort_accounts || []);
   setDetails('nrr_expansion', 'NRR — expansion accounts', nrr.expansion_accounts || []);
   setDetails('nrr_churned', 'NRR — churned accounts', nrr.churned_accounts || [], nrr.cancel_reason_summary || null);
@@ -951,6 +972,11 @@ function renderWaterfall(canvasId, nrr) {
 }
 
 function renderExpansion(exp) {
+  if (!exp) {
+    $('expansionCards').innerHTML = '<p class="text-muted small p-3">No expansion data available for this period.</p>';
+    $('expansionTable').innerHTML = '';
+    return;
+  }
   setDetails('exp_all', 'Expansion accounts (start MRR > $0)', exp.all_expanders || []);
   setDetails('new_mrr_all', 'New MRR accounts (start MRR = $0)', exp.new_mrr_accounts || []);
 
@@ -1052,7 +1078,9 @@ function renderCohortData(cd) {
 }
 
 function renderChurn(ch) {
+  if (!ch) { $('churnBuckets').innerHTML = '<p class="text-muted small p-3">No churn prediction data available for this period.</p>'; $('churnTable').innerHTML = ''; return; }
   if (ch.error) { $('churnBuckets').innerHTML = `<p class="text-danger">${ch.error}</p>`; return; }
+  if (!ch.buckets || !ch.buckets.length) { $('churnBuckets').innerHTML = '<p class="text-muted small p-3">No upcoming churn predicted for this period.</p>'; $('churnTable').innerHTML = ''; return; }
 
   // Drill-down per bucket
   const acctByBucket = {};
@@ -1094,7 +1122,9 @@ function renderChurn(ch) {
 }
 
 function renderAtRisk(ar) {
+  if (!ar) { $('atRiskSummary').innerHTML = '<p class="text-muted small p-3">No at-risk accounts data available for this period.</p>'; $('atRiskTable').innerHTML = ''; return; }
   if (ar.error) { $('atRiskSummary').innerHTML = `<p class="text-danger">${ar.error}</p>`; return; }
+  if (!ar.total_at_risk && !(ar.accounts && ar.accounts.length)) { $('atRiskSummary').innerHTML = '<p class="text-muted small p-3">No at-risk accounts found for this period. 🎉</p>'; $('atRiskTable').innerHTML = ''; return; }
 
   setDetails('at_risk_all', 'At-risk accounts (high/medium touch)', (ar.accounts || []).map(a => ({
     org_id: a.org_id,
@@ -1211,8 +1241,14 @@ async function loadMonthlyCohort() {
       btn.textContent = 'Retry';
       return;
     }
-    $('monthlyCohortNote').textContent = 'Pro/Premium logo & revenue retention by month.';
     const rows = data.cohorts || [];
+    if (!rows.length) {
+      $('monthlyCohortNote').textContent = 'No monthly cohort data available for this period.';
+      $('monthlyCohortTable').innerHTML = '<p class="text-muted small p-3">No monthly cohort data available.</p>';
+      btn.textContent = '✅ Loaded';
+      return;
+    }
+    $('monthlyCohortNote').textContent = 'Pro/Premium logo & revenue retention by month.';
     $('monthlyCohortTable').innerHTML = renderTable(rows, [
       {key:'month', label:'Month'},
       {key:'start_orgs', label:'Start Orgs'},
@@ -1365,6 +1401,7 @@ async function runGrowthSignals() {
 }
 
 function renderGrowthSignals(signals) {
+  if (!signals || !signals.length) { $('growthTable').innerHTML = '<p class="text-muted small p-3">No growth signals data available. Run Live Research to fetch signals.</p>'; return; }
   const withSignals = signals.filter(s => s.detected_growth_event_type);
   const without = signals.filter(s => !s.detected_growth_event_type);
 

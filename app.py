@@ -2639,6 +2639,19 @@ def _fetch_and_analyze_from_retool(force_refresh=False):
         result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
         _enrich_all_accounts_with_csm(result)
         _trim_response(result)
+
+        # Also compute monthly cohort data and fold into snapshot
+        try:
+            result["monthly_cohort"] = _compute_monthly_cohort()
+        except Exception as _mce:
+            print(f"[snapshot] monthly_cohort compute error: {_mce}", flush=True)
+            result["monthly_cohort"] = {"error": str(_mce)}
+        try:
+            result["monthly_retention_cohort"] = _compute_monthly_retention_cohort()
+        except Exception as _mrce:
+            print(f"[snapshot] monthly_retention_cohort compute error: {_mrce}", flush=True)
+            result["monthly_retention_cohort"] = {"error": str(_mrce)}
+
         return result
 
     except Exception as exc:
@@ -2829,103 +2842,188 @@ def upsell_potential(mrr):
     }
 
 
-@app.route("/api/monthly-cohort", methods=["GET"])
-def monthly_cohort():
-    """12-month retention cohort for Pro/Premium orgs using parameterized Retool workflow calls."""
-    try:
-        today = date.today().replace(day=1)  # 1st of current month
-        months = []
-        for i in range(12, 0, -1):
-            # Use proper calendar month arithmetic to avoid duplicate months
-            month_offset = today.month - i
-            year_offset = today.year + (month_offset - 1) // 12
-            month_val = ((month_offset - 1) % 12) + 1
-            m_start = date(year_offset, month_val, 1)
-            # End = 1st of next month
-            if m_start.month == 12:
-                m_end = m_start.replace(year=m_start.year + 1, month=1)
-            else:
-                m_end = m_start.replace(month=m_start.month + 1)
-            months.append((m_start, m_end))
+def _compute_monthly_cohort():
+    """Core logic for monthly cohort computation (extracted for reuse in snapshot)."""
+    today = date.today().replace(day=1)  # 1st of current month
+    months = []
+    for i in range(12, 0, -1):
+        month_offset = today.month - i
+        year_offset = today.year + (month_offset - 1) // 12
+        month_val = ((month_offset - 1) % 12) + 1
+        m_start = date(year_offset, month_val, 1)
+        if m_start.month == 12:
+            m_end = m_start.replace(year=m_start.year + 1, month=1)
+        else:
+            m_end = m_start.replace(month=m_start.month + 1)
+        months.append((m_start, m_end))
 
-        cohort_rows = []
-        for m_start, m_end in months:
-            try:
-                # Fetch START snapshot (1st of month)
-                raw_start = fetch_retool_webhook("organizations", payload={"target_date": m_start.isoformat()})
-                start_rows = _extract_rows_from_retool_response(raw_start)
-                # Fetch END snapshot (1st of next month)
-                raw_end = fetch_retool_webhook("organizations", payload={"target_date": m_end.isoformat()})
-                end_rows = _extract_rows_from_retool_response(raw_end)
-            except Exception:
-                start_rows, end_rows = [], []
+    cohort_rows = []
+    for m_start, m_end in months:
+        try:
+            raw_start = fetch_retool_webhook("organizations", payload={"target_date": m_start.isoformat()})
+            start_rows = _extract_rows_from_retool_response(raw_start)
+            raw_end = fetch_retool_webhook("organizations", payload={"target_date": m_end.isoformat()})
+            end_rows = _extract_rows_from_retool_response(raw_end)
+        except Exception:
+            start_rows, end_rows = [], []
 
-            if not start_rows:
-                cohort_rows.append({
-                    "month": m_start.strftime("%Y-%m"),
-                    "start_orgs": 0, "end_orgs": 0, "churned": 0,
-                    "logo_retention_pct": None,
-                    "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
-                })
-                continue
-
-            # Build lookup dicts by org_id
-            start_by_id = {}
-            for r in start_rows:
-                oid = str(r.get("org_id", "")).strip()
-                mrr_val = float(r.get("mrr", 0) or 0)
-                plan = norm_plan(r.get("plan", ""))
-                if oid and mrr_val > 0 and plan not in ADDON_PLANS:
-                    if oid not in start_by_id or mrr_val > start_by_id[oid]["mrr"]:
-                        start_by_id[oid] = {"mrr": mrr_val, "plan": plan}
-
-            end_by_id = {}
-            for r in end_rows:
-                oid = str(r.get("org_id", "")).strip()
-                mrr_val = float(r.get("mrr", 0) or 0)
-                plan = norm_plan(r.get("plan", ""))
-                if oid and plan not in ADDON_PLANS:
-                    if oid not in end_by_id or mrr_val > end_by_id[oid]["mrr"]:
-                        end_by_id[oid] = {"mrr": mrr_val, "plan": plan}
-
-            # Filter to Pro/Premium (NRR_PLANS) at start
-            pro_prem_start = {oid: info for oid, info in start_by_id.items() if info["plan"] in NRR_PLANS}
-
-            if not pro_prem_start:
-                cohort_rows.append({
-                    "month": m_start.strftime("%Y-%m"),
-                    "start_orgs": 0, "end_orgs": 0, "churned": 0,
-                    "logo_retention_pct": None,
-                    "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
-                })
-                continue
-
-            start_count = len(pro_prem_start)
-            churned_count = 0
-            s_mrr = 0
-            e_mrr = 0
-            for oid, info in pro_prem_start.items():
-                s_mrr += info["mrr"]
-                end_info = end_by_id.get(oid)
-                if end_info and end_info["mrr"] > 0:
-                    e_mrr += end_info["mrr"]
-                else:
-                    churned_count += 1
-
-            end_count = start_count - churned_count
-
+        if not start_rows:
             cohort_rows.append({
                 "month": m_start.strftime("%Y-%m"),
-                "start_orgs": start_count,
-                "end_orgs": end_count,
-                "churned": churned_count,
-                "logo_retention_pct": round(end_count / start_count * 100, 1) if start_count else None,
-                "start_mrr": money(s_mrr),
-                "end_mrr": money(e_mrr),
-                "nrr_pct": round(e_mrr / s_mrr * 100, 1) if s_mrr else None,
+                "start_orgs": 0, "end_orgs": 0, "churned": 0,
+                "logo_retention_pct": None,
+                "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
             })
+            continue
 
-        return jsonify({"success": True, "cohorts": cohort_rows})
+        start_by_id = {}
+        for r in start_rows:
+            oid = str(r.get("org_id", "")).strip()
+            mrr_val = float(r.get("mrr", 0) or 0)
+            plan = norm_plan(r.get("plan", ""))
+            if oid and mrr_val > 0 and plan not in ADDON_PLANS:
+                if oid not in start_by_id or mrr_val > start_by_id[oid]["mrr"]:
+                    start_by_id[oid] = {"mrr": mrr_val, "plan": plan}
+
+        end_by_id = {}
+        for r in end_rows:
+            oid = str(r.get("org_id", "")).strip()
+            mrr_val = float(r.get("mrr", 0) or 0)
+            plan = norm_plan(r.get("plan", ""))
+            if oid and plan not in ADDON_PLANS:
+                if oid not in end_by_id or mrr_val > end_by_id[oid]["mrr"]:
+                    end_by_id[oid] = {"mrr": mrr_val, "plan": plan}
+
+        pro_prem_start = {oid: info for oid, info in start_by_id.items() if info["plan"] in NRR_PLANS}
+
+        if not pro_prem_start:
+            cohort_rows.append({
+                "month": m_start.strftime("%Y-%m"),
+                "start_orgs": 0, "end_orgs": 0, "churned": 0,
+                "logo_retention_pct": None,
+                "start_mrr": 0, "end_mrr": 0, "nrr_pct": None,
+            })
+            continue
+
+        start_count = len(pro_prem_start)
+        churned_count = 0
+        s_mrr = 0
+        e_mrr = 0
+        for oid, info in pro_prem_start.items():
+            s_mrr += info["mrr"]
+            end_info = end_by_id.get(oid)
+            if end_info and end_info["mrr"] > 0:
+                e_mrr += end_info["mrr"]
+            else:
+                churned_count += 1
+
+        end_count = start_count - churned_count
+
+        cohort_rows.append({
+            "month": m_start.strftime("%Y-%m"),
+            "start_orgs": start_count,
+            "end_orgs": end_count,
+            "churned": churned_count,
+            "logo_retention_pct": round(end_count / start_count * 100, 1) if start_count else None,
+            "start_mrr": money(s_mrr),
+            "end_mrr": money(e_mrr),
+            "nrr_pct": round(e_mrr / s_mrr * 100, 1) if s_mrr else None,
+        })
+
+    return {"success": True, "cohorts": cohort_rows}
+
+
+def _compute_monthly_retention_cohort():
+    """Core logic for monthly retention cohort computation (extracted for reuse in snapshot)."""
+    today = date.today().replace(day=1)
+
+    cohort_months = []
+    for i in range(12, 0, -1):
+        m = (today - timedelta(days=i * 30)).replace(day=1)
+        cohort_months.append(m)
+
+    all_months = []
+    for i in range(13, -1, -1):
+        m = (today - timedelta(days=i * 30)).replace(day=1)
+        all_months.append(m)
+    all_months = sorted(set(all_months))
+
+    snapshots = {}
+    for obs_month in all_months:
+        try:
+            raw = fetch_retool_webhook("organizations", payload={"target_date": obs_month.isoformat()})
+            rows = _extract_rows_from_retool_response(raw)
+            snap = {}
+            for r in rows:
+                oid = str(r.get("org_id", "")).strip()
+                plan = norm_plan(r.get("plan", r.get("end_plan", "")))
+                mrr = float(r.get("mrr", r.get("end_mrr", 0) or 0) or 0)
+                if oid and mrr > 0:
+                    snap[oid] = {"plan": plan, "mrr": mrr}
+            snapshots[obs_month.strftime("%Y-%m")] = snap
+        except Exception:
+            snapshots[obs_month.strftime("%Y-%m")] = {}
+
+    org_first_month = {}
+    for obs_month in all_months:
+        ms = obs_month.strftime("%Y-%m")
+        for oid in snapshots.get(ms, {}):
+            if oid not in org_first_month:
+                org_first_month[oid] = ms
+
+    obs_month_keys = [m.strftime("%Y-%m") for m in all_months]
+
+    def build_cohort_table(plan_set, label):
+        cohort_data = []
+        for cohort_month in cohort_months:
+            cms = cohort_month.strftime("%Y-%m")
+            snap_cm = snapshots.get(cms, {})
+            cohort_orgs = [
+                oid for oid, info in snap_cm.items()
+                if org_first_month.get(oid) == cms and info.get("plan") in plan_set
+            ]
+            if not cohort_orgs:
+                continue
+            size = len(cohort_orgs)
+            cohort_set = set(cohort_orgs)
+            retentions = []
+            for obs_ms in obs_month_keys:
+                if obs_ms < cms:
+                    continue
+                snap_obs = snapshots.get(obs_ms, {})
+                active = sum(1 for oid in cohort_set if oid in snap_obs)
+                pct = round(active / size * 100, 1)
+                retentions.append({"month": obs_ms, "count": active, "pct": pct})
+            cohort_data.append({
+                "cohort_month": cms,
+                "size": size,
+                "retentions": retentions,
+            })
+        return {"label": label, "cohorts": cohort_data}
+
+    high_med_table = build_cohort_table(COHORT_HIGH_MED, "High/Med Touch")
+    essential_table = build_cohort_table(COHORT_ESSENTIAL, "Essential")
+
+    return {
+        "success": True,
+        "high_med": high_med_table,
+        "essential": essential_table,
+        "observation_months": obs_month_keys,
+    }
+
+
+@app.route("/api/monthly-cohort", methods=["GET"])
+def monthly_cohort():
+    """12-month retention cohort for Pro/Premium orgs. Serves from snapshot if available."""
+    try:
+        snap = _load_snapshot()
+        if snap and isinstance(snap, dict) and snap.get("result", {}).get("monthly_cohort"):
+            return jsonify(snap["result"]["monthly_cohort"])
+    except Exception:
+        pass
+    # Fallback: live computation
+    try:
+        return jsonify(_compute_monthly_cohort())
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2933,94 +3031,20 @@ def monthly_cohort():
 
 @app.route("/api/monthly-retention-cohort", methods=["GET"])
 def monthly_retention_cohort():
-    """Monthly retention cohort tables from Retool — two tables: High/Med Touch and Essential.
-    Each row = one cohort month (orgs who started that month).
-    Each column = retention at M0, M1, M2, ... up to current.
-    Uses the Retool organizations workflow with target_date params."""
+    """Monthly retention cohort tables. Serves from snapshot if available, else live computation."""
     try:
-        today = date.today().replace(day=1)
-
-        # Build list of cohort months (last 12 months)
-        cohort_months = []
-        for i in range(12, 0, -1):
-            m = (today - timedelta(days=i * 30)).replace(day=1)
-            cohort_months.append(m)
-
-        # Build list of observation months (current + past 12)
-        all_months = []
-        for i in range(13, -1, -1):
-            m = (today - timedelta(days=i * 30)).replace(day=1)
-            all_months.append(m)
-        all_months = sorted(set(all_months))
-
-        # Fetch snapshot for each observation month
-        snapshots = {}  # month_str -> set of active org_ids with plan info
-        for obs_month in all_months:
-            try:
-                raw = fetch_retool_webhook("organizations", payload={"target_date": obs_month.isoformat()})
-                rows = _extract_rows_from_retool_response(raw)
-                snap = {}
-                for r in rows:
-                    oid = str(r.get("org_id", "")).strip()
-                    plan = norm_plan(r.get("plan", r.get("end_plan", "")))
-                    mrr = float(r.get("mrr", r.get("end_mrr", 0) or 0) or 0)
-                    if oid and mrr > 0:
-                        snap[oid] = {"plan": plan, "mrr": mrr}
-                snapshots[obs_month.strftime("%Y-%m")] = snap
-            except Exception:
-                snapshots[obs_month.strftime("%Y-%m")] = {}
-
-        # For each cohort month, determine which orgs first appeared in that month
-        org_first_month = {}
-        for obs_month in all_months:
-            ms = obs_month.strftime("%Y-%m")
-            for oid in snapshots.get(ms, {}):
-                if oid not in org_first_month:
-                    org_first_month[oid] = ms
-
-        obs_month_keys = [m.strftime("%Y-%m") for m in all_months]
-
-        def build_cohort_table(plan_set, label):
-            cohort_data = []
-            for cohort_month in cohort_months:
-                cms = cohort_month.strftime("%Y-%m")
-                # Orgs whose first month is this cohort month AND whose plan is in plan_set at that time
-                snap_cm = snapshots.get(cms, {})
-                cohort_orgs = [
-                    oid for oid, info in snap_cm.items()
-                    if org_first_month.get(oid) == cms and info.get("plan") in plan_set
-                ]
-                if not cohort_orgs:
-                    continue
-                size = len(cohort_orgs)
-                cohort_set = set(cohort_orgs)
-                retentions = []
-                for obs_ms in obs_month_keys:
-                    if obs_ms < cms:
-                        continue  # Before cohort month
-                    snap_obs = snapshots.get(obs_ms, {})
-                    active = sum(1 for oid in cohort_set if oid in snap_obs)
-                    pct = round(active / size * 100, 1)
-                    retentions.append({"month": obs_ms, "count": active, "pct": pct})
-                cohort_data.append({
-                    "cohort_month": cms,
-                    "size": size,
-                    "retentions": retentions,
-                })
-            return {"label": label, "cohorts": cohort_data}
-
-        high_med_table = build_cohort_table(COHORT_HIGH_MED, "High/Med Touch")
-        essential_table = build_cohort_table(COHORT_ESSENTIAL, "Essential")
-
-        return jsonify({
-            "success": True,
-            "high_med": high_med_table,
-            "essential": essential_table,
-            "observation_months": obs_month_keys,
-        })
+        snap = _load_snapshot()
+        if snap and isinstance(snap, dict) and snap.get("result", {}).get("monthly_retention_cohort"):
+            return jsonify(snap["result"]["monthly_retention_cohort"])
+    except Exception:
+        pass
+    # Fallback: live computation
+    try:
+        return jsonify(_compute_monthly_retention_cohort())
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/api/csm-lookup", methods=["POST"])
