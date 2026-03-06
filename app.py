@@ -2539,6 +2539,22 @@ def _save_snapshot_month_only(payload, year_month: str):
     os.replace(tmp, month_path)
 
 
+def _prune_old_snapshots(keep_months=4):
+    """Delete snapshots older than keep_months (current + 3 previous). Past data is frozen."""
+    available = _list_available_snapshots()
+    if len(available) <= keep_months:
+        return
+    to_keep = set(available[-keep_months:])
+    for m in available:
+        if m not in to_keep:
+            path = _snapshot_path_for_month(m)
+            try:
+                os.remove(path)
+                print(f"[prune] Removed old snapshot: {m}", flush=True)
+            except Exception:
+                pass
+
+
 def _list_available_snapshots():
     """Return list of available month snapshots, e.g. ['2025-12', '2026-01', '2026-02', '2026-03']"""
     if not os.path.isdir(SNAPSHOT_DIR):
@@ -2588,6 +2604,7 @@ def api_snapshot_refresh():
             
             payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
             _save_snapshot(payload, year_month=month_key)
+            _prune_old_snapshots(keep_months=4)  # current + 3 previous
             
             return jsonify({
                 "success": True,
