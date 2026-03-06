@@ -2559,66 +2559,91 @@ def api_snapshot_get():
     return jsonify({"success": True, **snap})
 
 
+_refresh_status = {"running": False, "progress": {}, "errors": {}, "started_at": None, "finished_at": None}
+
+def _run_refresh_background(months_to_refresh):
+    """Run multi-month snapshot refresh in a background thread."""
+    from datetime import datetime as _dt, timedelta
+    global _refresh_status
+    _refresh_status = {"running": True, "progress": {}, "errors": {}, "started_at": _dt.utcnow().isoformat(), "finished_at": None}
+
+    now = _dt.utcnow()
+    for i in range(months_to_refresh):
+        if i == 0:
+            end_date = now.strftime("%Y-%m-%d")
+            month_key = now.strftime("%Y-%m")
+        else:
+            target = now.replace(day=1)
+            for _ in range(i):
+                target = (target - timedelta(days=1)).replace(day=1)
+            next_month = target.replace(day=28) + timedelta(days=4)
+            end_date = (next_month - timedelta(days=next_month.day)).strftime("%Y-%m-%d")
+            month_key = target.strftime("%Y-%m")
+
+        _refresh_status["progress"][month_key] = "running"
+        print(f"[snapshot-refresh] Generating snapshot for {month_key} (end_date={end_date})...", flush=True)
+        try:
+            with app.test_request_context('/api/snapshot-refresh', method='POST'):
+                res = _fetch_and_analyze_from_retool(force_refresh=True, override_end_date=end_date)
+            if res.get("success"):
+                payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
+                if i == 0:
+                    _save_snapshot(payload, year_month=month_key)
+                else:
+                    _save_snapshot_month_only(payload, year_month=month_key)
+                _refresh_status["progress"][month_key] = "ok"
+            else:
+                _refresh_status["progress"][month_key] = "failed"
+                _refresh_status["errors"][month_key] = res.get("message", "unknown")
+        except Exception as e:
+            _refresh_status["progress"][month_key] = "error"
+            _refresh_status["errors"][month_key] = str(e)[:200]
+            print(f"[snapshot-refresh] Error for {month_key}: {e}", flush=True)
+
+    _refresh_status["running"] = False
+    _refresh_status["finished_at"] = pd.Timestamp.now().isoformat()
+    print(f"[snapshot-refresh] Done. Progress: {_refresh_status['progress']}", flush=True)
+
+
 @app.route("/api/snapshot-refresh", methods=["POST"])
 def api_snapshot_refresh():
-    """Admin-triggered snapshot refresh. Generates current month + last 3 months.
-    
-    Pass ?months=1 to only refresh current month (faster).
-    Default: refreshes 4 months (current + 3 previous).
+    """Admin-triggered snapshot refresh. Runs async, returns immediately.
+    Poll /api/snapshot-status to check progress.
+    Pass JSON {"months": N} to control how many months (default 4, max 12).
     """
     auth = request.headers.get("X-Admin-Key", "")
     if auth != "AdminSynderAnalytics!":
         return jsonify({"error": "unauthorized"}), 401
+
+    if _refresh_status.get("running"):
+        return jsonify({"status": "already_running", "progress": _refresh_status["progress"]}), 200
+
     try:
-        from datetime import datetime as _dt, timedelta
-        
-        months_to_refresh = int(request.args.get("months") or request.json.get("months", 4) if request.is_json else 4)
+        body = request.get_json(silent=True) or {}
+        months_to_refresh = int(request.args.get("months") or body.get("months", 4))
         months_to_refresh = max(1, min(months_to_refresh, 12))
-        
-        now = _dt.utcnow()
-        results = {}
-        errors = {}
-        
-        for i in range(months_to_refresh):
-            # Calculate end date (last day of the target month)
-            if i == 0:
-                end_date = now.strftime("%Y-%m-%d")
-                month_key = now.strftime("%Y-%m")
-            else:
-                # Go back i months
-                target = now.replace(day=1)
-                for _ in range(i):
-                    target = (target - timedelta(days=1)).replace(day=1)
-                # End date = last day of that month
-                next_month = target.replace(day=28) + timedelta(days=4)
-                end_date = (next_month - timedelta(days=next_month.day)).strftime("%Y-%m-%d")
-                month_key = target.strftime("%Y-%m")
-            
-            print(f"[snapshot-refresh] Generating snapshot for {month_key} (end_date={end_date})...", flush=True)
-            try:
-                res = _fetch_and_analyze_from_retool(force_refresh=True, override_end_date=end_date)
-                if res.get("success"):
-                    payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
-                    if i == 0:
-                        _save_snapshot(payload, year_month=month_key)  # saves as latest + month
-                    else:
-                        _save_snapshot_month_only(payload, year_month=month_key)
-                    results[month_key] = "ok"
-                else:
-                    errors[month_key] = res.get("message", "unknown error")
-            except Exception as e:
-                print(f"[snapshot-refresh] Error for {month_key}: {e}", flush=True)
-                errors[month_key] = str(e)[:200]
-        
+
+        import threading
+        t = threading.Thread(target=_run_refresh_background, args=(months_to_refresh,), daemon=True)
+        t.start()
+
         return jsonify({
-            "success": len(errors) == 0,
-            "refreshed": results,
-            "errors": errors,
-            "available_months": _list_available_snapshots()
+            "status": "started",
+            "months": months_to_refresh,
+            "message": f"Refresh started for {months_to_refresh} month(s). Poll /api/snapshot-status for progress."
         })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/snapshot-status", methods=["GET"])
+def api_snapshot_status():
+    """Check status of the ongoing or last snapshot refresh."""
+    return jsonify({
+        **_refresh_status,
+        "available_months": _list_available_snapshots()
+    })
 
 
 def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None):
