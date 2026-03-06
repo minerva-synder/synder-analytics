@@ -2492,20 +2492,62 @@ SNAPSHOT_DIR = "/data/snapshots" if os.path.isdir("/data") else os.path.join(os.
 SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "latest.json")
 
 
-def _load_snapshot():
+def _snapshot_path_for_month(year_month: str) -> str:
+    """Return path for a month-specific snapshot, e.g. '2026-03' -> /data/snapshots/2026-03.json"""
+    return os.path.join(SNAPSHOT_DIR, f"{year_month}.json")
+
+
+def _load_snapshot(year_month: str = None):
+    """Load snapshot. If year_month given (e.g. '2026-02'), load that month. Otherwise load latest."""
     try:
+        if year_month:
+            path = _snapshot_path_for_month(year_month)
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    return json.load(f)
+            return None
         with open(SNAPSHOT_FILE, "r") as f:
             return json.load(f)
     except Exception:
         return None
 
 
-def _save_snapshot(payload):
+def _save_snapshot(payload, year_month: str = None):
+    """Save snapshot. If year_month given, save as month-specific file AND as latest."""
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    # Always save to latest
     tmp = SNAPSHOT_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, SNAPSHOT_FILE)
+    # Also save month-specific copy
+    if year_month:
+        month_path = _snapshot_path_for_month(year_month)
+        tmp2 = month_path + ".tmp"
+        with open(tmp2, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp2, month_path)
+
+
+def _save_snapshot_month_only(payload, year_month: str):
+    """Save only the month-specific snapshot (not latest)."""
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    month_path = _snapshot_path_for_month(year_month)
+    tmp = month_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, month_path)
+
+
+def _list_available_snapshots():
+    """Return list of available month snapshots, e.g. ['2025-12', '2026-01', '2026-02', '2026-03']"""
+    if not os.path.isdir(SNAPSHOT_DIR):
+        return []
+    months = []
+    for f in os.listdir(SNAPSHOT_DIR):
+        if f.endswith(".json") and f != "latest.json" and len(f) == 12:  # YYYY-MM.json
+            months.append(f.replace(".json", ""))
+    return sorted(months)
 
 
 @app.route("/api/snapshot", methods=["GET"])
@@ -2519,27 +2561,72 @@ def api_snapshot_get():
 
 @app.route("/api/snapshot-refresh", methods=["POST"])
 def api_snapshot_refresh():
-    """Admin-triggered snapshot refresh (calls Retool once, stores on Railway volume)."""
+    """Admin-triggered snapshot refresh. Generates current month + last 3 months.
+    
+    Pass ?months=1 to only refresh current month (faster).
+    Default: refreshes 4 months (current + 3 previous).
+    """
     auth = request.headers.get("X-Admin-Key", "")
     if auth != "AdminSynderAnalytics!":
         return jsonify({"error": "unauthorized"}), 401
     try:
-        # Reuse fetch_data logic by calling it internally with force_refresh
-        res = _fetch_and_analyze_from_retool(force_refresh=True)
-        if res.get("success"):
-            _save_snapshot({"fetched_at": pd.Timestamp.now().isoformat(), "result": res})
-        return jsonify(res)
+        from datetime import datetime as _dt, timedelta
+        
+        months_to_refresh = int(request.args.get("months") or request.json.get("months", 4) if request.is_json else 4)
+        months_to_refresh = max(1, min(months_to_refresh, 12))
+        
+        now = _dt.utcnow()
+        results = {}
+        errors = {}
+        
+        for i in range(months_to_refresh):
+            # Calculate end date (last day of the target month)
+            if i == 0:
+                end_date = now.strftime("%Y-%m-%d")
+                month_key = now.strftime("%Y-%m")
+            else:
+                # Go back i months
+                target = now.replace(day=1)
+                for _ in range(i):
+                    target = (target - timedelta(days=1)).replace(day=1)
+                # End date = last day of that month
+                next_month = target.replace(day=28) + timedelta(days=4)
+                end_date = (next_month - timedelta(days=next_month.day)).strftime("%Y-%m-%d")
+                month_key = target.strftime("%Y-%m")
+            
+            print(f"[snapshot-refresh] Generating snapshot for {month_key} (end_date={end_date})...", flush=True)
+            try:
+                res = _fetch_and_analyze_from_retool(force_refresh=True, override_end_date=end_date)
+                if res.get("success"):
+                    payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
+                    if i == 0:
+                        _save_snapshot(payload, year_month=month_key)  # saves as latest + month
+                    else:
+                        _save_snapshot_month_only(payload, year_month=month_key)
+                    results[month_key] = "ok"
+                else:
+                    errors[month_key] = res.get("message", "unknown error")
+            except Exception as e:
+                print(f"[snapshot-refresh] Error for {month_key}: {e}", flush=True)
+                errors[month_key] = str(e)[:200]
+        
+        return jsonify({
+            "success": len(errors) == 0,
+            "refreshed": results,
+            "errors": errors,
+            "available_months": _list_available_snapshots()
+        })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-def _fetch_and_analyze_from_retool(force_refresh=False):
+def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None):
     """Core logic: call Retool and build analysis JSON (used by fetch-data and snapshot-refresh)."""
-    # Read date range from query params
+    # Read date range from query params or override
     _json_body = request.get_json(silent=True) or {}
     start_date = request.args.get("start") or _json_body.get("start")
-    end_date = request.args.get("end") or _json_body.get("end")
+    end_date = override_end_date or request.args.get("end") or _json_body.get("end")
     payload = {}
     if start_date: payload["start_date"] = start_date
     if end_date: payload["end_date"] = end_date
@@ -2664,19 +2751,41 @@ def _fetch_and_analyze_from_retool(force_refresh=False):
 def fetch_data():
     """Default dashboard data endpoint.
 
-    Serves ONLY from stored snapshot. Never calls Retool directly.
+    Serves ONLY from stored snapshots. Never calls Retool directly.
     Snapshots are refreshed daily via /api/snapshot-refresh (cron-triggered).
+    Supports ?end=YYYY-MM-DD to load a specific month's snapshot.
     """
     try:
-        snap = _load_snapshot()
+        # Determine which month snapshot to load from the end date param
+        _json_body = request.get_json(silent=True) or {}
+        end_date = request.args.get("end") or _json_body.get("end")
+
+        target_month = None
+        if end_date:
+            try:
+                from datetime import datetime as _dt
+                ed = _dt.fromisoformat(end_date.replace("Z", "+00:00")) if "T" in end_date else _dt.strptime(end_date, "%Y-%m-%d")
+                target_month = ed.strftime("%Y-%m")
+            except Exception:
+                pass
+
+        # Try month-specific snapshot first, then fall back to latest
+        snap = None
+        if target_month:
+            snap = _load_snapshot(year_month=target_month)
+        if not snap:
+            snap = _load_snapshot()
+
         if snap and isinstance(snap, dict) and snap.get("result"):
             result = snap["result"]
             result["snapshot_fetched_at"] = snap.get("fetched_at", "unknown")
+            result["available_months"] = _list_available_snapshots()
             return jsonify(result)
 
         return jsonify({
             "connecting": True,
-            "message": "No data snapshot available yet. Data refreshes automatically once per day. An admin can trigger a manual refresh via POST /api/snapshot-refresh."
+            "message": "No data snapshot available yet. Data refreshes automatically once per day. An admin can trigger a manual refresh via POST /api/snapshot-refresh.",
+            "available_months": _list_available_snapshots()
         })
 
     except Exception as e:
