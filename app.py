@@ -2651,175 +2651,24 @@ def _fetch_and_analyze_from_retool(force_refresh=False):
 def fetch_data():
     """Default dashboard data endpoint.
 
-    Behavior:
-    - If a stored snapshot exists, return it immediately (no Retool call).
-    - Otherwise attempt live fetch from Retool (may be slow / quota-limited).
+    Serves ONLY from stored snapshot. Never calls Retool directly.
+    Snapshots are refreshed daily via /api/snapshot-refresh (cron-triggered).
     """
     try:
-        # 0) Prefer stored snapshot (no Retool calls)
         snap = _load_snapshot()
         if snap and isinstance(snap, dict) and snap.get("result"):
-            return jsonify(snap["result"])
+            result = snap["result"]
+            result["snapshot_fetched_at"] = snap.get("fetched_at", "unknown")
+            return jsonify(result)
 
-        # 1) No snapshot yet → attempt live Retool fetch (may be slow / quota-limited)
-        # Read date range from query params
-        _json_body = request.get_json(silent=True) or {}
-        start_date = request.args.get("start") or _json_body.get("start")
-        end_date = request.args.get("end") or _json_body.get("end")
-        payload = {}
-        if start_date: payload["start_date"] = start_date
-        if end_date: payload["end_date"] = end_date
-
-        try:
-            # Fetch end-date snapshot (latest by default)
-            end_payload = {"target_date": end_date} if end_date else {}
-            raw_end = fetch_retool_webhook("organizations", payload=end_payload or None)
-            if isinstance(raw_end, dict) and raw_end.get("error"):
-                raise Exception(f"Retool HTTP {raw_end.get('status')}: {raw_end.get('body','')[:500]}")
-            end_rows = _extract_rows_from_retool_response(raw_end)
-
-            # Determine start_date from end snapshot if not provided
-            if not start_date and end_rows:
-                from datetime import datetime, timedelta
-                snap = end_rows[0].get("snapshot_date", "")
-                try:
-                    end_dt = datetime.fromisoformat(snap.replace("Z", "+00:00")) if snap else datetime.utcnow()
-                    # Use 1st of previous month as start date (not end - 30 days)
-                    if end_dt.month == 1:
-                        start_dt = end_dt.replace(year=end_dt.year - 1, month=12, day=1)
-                    else:
-                        start_dt = end_dt.replace(month=end_dt.month - 1, day=1)
-                    start_date = start_dt.strftime("%Y-%m-%d")
-                except Exception:
-                    start_date = None
-
-            # Fetch start-date snapshot
-            if start_date:
-                start_payload = {"target_date": start_date}
-                raw_start = fetch_retool_webhook("organizations", payload=start_payload)
-                if isinstance(raw_start, dict) and raw_start.get("error"):
-                    raise Exception(f"Retool start HTTP {raw_start.get('status')}: {raw_start.get('body','')[:500]}")
-                start_rows = _extract_rows_from_retool_response(raw_start)
-            else:
-                start_rows = end_rows  # fallback: same as end
-
-            # Merge start + end into the format build_dataframes_from_rows expects
-            # Orgs may have multiple rows (base plan + add-ons). Keep the one with highest MRR
-            # as primary, and sum all MRRs for total.
-            def _dedup_by_id(row_list):
-                """Group rows by org_id: keep base plan as primary, sum total MRR."""
-                groups = {}
-                for r in row_list:
-                    oid = str(r.get("org_id", ""))
-                    if oid not in groups:
-                        groups[oid] = []
-                    groups[oid].append(r)
-                result = {}
-                for oid, rlist in groups.items():
-                    # Prefer base plans over add-ons; break ties by MRR
-                    def _plan_sort_key(x):
-                        p = (x.get("plan", "") or "").upper()
-                        is_addon = p in ADDON_PLANS
-                        return (0 if not is_addon else 1, -float(x.get("mrr", 0) or 0))
-                    primary = min(rlist, key=_plan_sort_key)
-                    total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
-                    primary = dict(primary)
-                    primary["mrr"] = total_mrr
-                    result[oid] = primary
-                return result
-
-            start_by_id = _dedup_by_id(start_rows)
-            end_by_id = _dedup_by_id(end_rows)
-            all_ids = set(start_by_id.keys()) | set(end_by_id.keys())
-
-            snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
-            snapshot_start_date = start_rows[0].get("snapshot_date", "") if start_rows else ""
-
-            # Also fetch sync health data (subscription + sync details for at-risk analysis)
-            sync_health_by_id = {}
-            for qname in ["org_sync_health", "sync_health", "organization_health", "org_health"]:
-                try:
-                    raw_sync = fetch_retool_webhook(qname)
-                    if not (isinstance(raw_sync, dict) and raw_sync.get("error")):
-                        sync_rows = _extract_rows_from_retool_response(raw_sync)
-                        if sync_rows:
-                            for sr in sync_rows:
-                                sid = str(sr.get("org_id", "")).strip()
-                                if sid:
-                                    sync_health_by_id[sid] = sr
-                            print(f"[fetch-data] Loaded {len(sync_health_by_id)} sync health rows via query '{qname}'", flush=True)
-                            break
-                except Exception:
-                    continue
-
-            rows = []
-            for oid in all_ids:
-                s = start_by_id.get(oid, {})
-                e = end_by_id.get(oid, {})
-                sh = sync_health_by_id.get(oid, {})
-                row = {
-                    "org_id": oid,
-                    "org_link": (e or s).get("org_link", f"https://go.synder.com/organizations/view/{oid}"),
-                    "org_name": (e or s).get("org_name", f"Org {oid}"),
-                    "end_plan": e.get("plan", ""),
-                    "start_plan": s.get("plan", ""),
-                    "end_mrr": float(e.get("mrr", 0) or 0),
-                    "start_mrr": float(s.get("mrr", 0) or 0),
-                    "snapshot_end_date": snapshot_end_date,
-                    "snapshot_start_date": snapshot_start_date,
-                    "industry": (e or s).get("industry", ""),
-                    "first_paid_date": (e or s).get("first_paid_date", ""),
-                    "total_syncs": sh.get("total_syncs") or (e or s).get("total_syncs", 0),
-                    "subscription_end_date": sh.get("subscription_end_date") or (e or s).get("subscription_end_date", ""),
-                    "cancellation_date": sh.get("cancellation_date") or (e or s).get("cancellation_date", ""),
-                    "subscription_status": sh.get("subscription_status") or (e or s).get("subscription_status", ""),
-                    "latest_sub_status": sh.get("latest_sub_status") or (e or s).get("latest_sub_status", ""),
-                    # Sync health fields (from separate sync_health query if available)
-                    "subscription_start_date": sh.get("subscription_start_date") or (e or s).get("subscription_start_date", "") or (e or s).get("first_paid_date", ""),
-                    "subscription_interval": sh.get("subscription_interval") or (e or s).get("subscription_interval", ""),
-                    "last_sync_date": sh.get("last_sync_date") or (e or s).get("last_sync_date", ""),
-                    "finished_syncs": sh.get("finished_syncs") or (e or s).get("finished_syncs", 0),
-                    "failed_syncs": sh.get("failed_syncs") or (e or s).get("failed_syncs", 0),
-                    "cancelled_syncs": sh.get("cancelled_syncs") or (e or s).get("cancelled_syncs", 0),
-                    "rule_failed_syncs": sh.get("rule_failed_syncs") or (e or s).get("rule_failed_syncs", 0),
-                    "syncs_current_cycle": sh.get("syncs_current_cycle") or sh.get("current_cycle_syncs") or (e or s).get("syncs_current_cycle", 0),
-                    # Migration fields for proper churn exclusion
-                    "migrated_to": sh.get("migrated_to") or (e or s).get("migrated_to", ""),
-                    "migrated_from": sh.get("migrated_from") or (e or s).get("migrated_from", ""),
-                    "migration_org_id": sh.get("migration_org_id") or (e or s).get("migration_org_id", ""),
-                }
-                rows.append(row)
-        except Exception as exc:
-            rows = []
-            webhook_error = str(exc)
-            import traceback as _tb
-            print(f"[fetch-data] Retool webhook error: {exc}\n{_tb.format_exc()}", flush=True)
-        else:
-            webhook_error = None
-
-        if rows:
-            mrr_df, orgs_df, warns = build_dataframes_from_rows(rows)
-            if "org_id" not in mrr_df.columns:
-                rows = []
-            else:
-                result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
-                # Enrich all accounts with CSM names from HubSpot
-                _enrich_all_accounts_with_csm(result)
-                # Trim large account lists to keep response under 100KB
-                _trim_response(result)
-                return jsonify(result)
-
-        # 2. Fallback: friendly "connecting" response
-        msg = "Database connecting..."
-        if webhook_error:
-            msg += f" ({webhook_error[:120]})"
-        else:
-            msg += " (Workflow returned empty data — SQL blocks need to be configured in Retool)"
-        return jsonify({"connecting": True, "message": msg})
+        return jsonify({
+            "connecting": True,
+            "message": "No data snapshot available yet. Data refreshes automatically once per day. An admin can trigger a manual refresh via POST /api/snapshot-refresh."
+        })
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"connecting": True, "message": f"Database connecting... ({str(e)[:120]})"})
+        return jsonify({"connecting": True, "message": f"Error loading snapshot: {str(e)[:120]}"})
 
 
 @app.route("/api/auto-fetch", methods=["POST"])
