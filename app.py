@@ -2750,17 +2750,11 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
                     is_addon = p in ADDON_PLANS
                     return (0 if not is_addon else 1, -float(x.get("mrr", 0) or 0))
                 primary = min(rlist, key=_plan_sort_key)
-                # Deduplicate identical (plan, mrr) rows before summing —
-                # Retool view can return duplicate rows per integration/connection.
-                # Only sum across DISTINCT (plan, mrr) combinations to avoid inflating MRR.
-                seen = set()
-                unique_mrr_rows = []
-                for x in rlist:
-                    key = (str(x.get("plan", "")).upper(), round(float(x.get("mrr", 0) or 0), 2))
-                    if key not in seen:
-                        seen.add(key)
-                        unique_mrr_rows.append(x)
-                total_mrr = sum(float(x.get("mrr", 0) or 0) for x in unique_mrr_rows)
+                # Sum MRR across all rows — each row represents a separate connection/integration
+                # with its own billing. This is correct for multi-connection orgs.
+                # Note: some orgs (e.g. sandbox/TRIAL_EXPIRED) may have duplicate rows
+                # that inflate MRR — this is a Retool view data quality issue.
+                total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
                 primary = dict(primary)
                 primary["mrr"] = total_mrr
                 result[oid] = primary
