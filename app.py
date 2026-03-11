@@ -2488,7 +2488,22 @@ def _trim_response(result, max_accounts=50):
                                 trim_list(v, key)
 
 
-SNAPSHOT_DIR = "/data/snapshots" if os.path.isdir("/data") else os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+def _resolve_snapshot_dir():
+    # Prefer Railway persistent volume; fall back to local dir inside container
+    for candidate in ["/data/snapshots", "/app/snapshots"]:
+        parent = os.path.dirname(candidate)
+        if os.path.isdir(parent) or parent == "/":
+            try:
+                os.makedirs(candidate, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+    # Last resort: relative to app file
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+SNAPSHOT_DIR = _resolve_snapshot_dir()
 SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "latest.json")
 
 
@@ -2515,8 +2530,10 @@ def _load_snapshot(year_month: str = None):
 def _save_snapshot(payload, year_month: str = None):
     """Save snapshot. If year_month given, save as month-specific file AND as latest."""
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    # Always save to latest
-    tmp = SNAPSHOT_FILE + ".tmp"
+    # Always save to latest (use unique tmp name per thread to avoid race)
+    import threading as _threading
+    tid = _threading.get_ident()
+    tmp = SNAPSHOT_FILE + f".tmp{tid}"
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, SNAPSHOT_FILE)
