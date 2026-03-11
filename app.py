@@ -955,10 +955,8 @@ def nrr_analysis(mrr, migrated_source_ids=None):
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
     active = cohort[~cohort["_churned"]]
-    # For expansion/contraction, exclude migrated-in orgs (their delta is transfer, not organic)
-    organic_active = active[~active["_migrated_new"]]
-    exp = organic_active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
-    contr = organic_active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
+    exp = active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
+    contr = active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
 
     breakdown = []
     for plan in sorted(cohort["_sp"].dropna().unique()):
@@ -1107,14 +1105,14 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
 def expansion_analysis(mrr, migrated_source_ids=None):
     mrr = prepare_mrr(mrr)
     mrr["_delta"] = mrr["_em"] - mrr["_sm"]
-    # Mark migrated-in orgs (exclude from new MRR — their revenue is transferred, not new)
+    # Mark migrated-in orgs (exclude from NEW MRR only — their initial revenue is transferred, not new)
     mrr["_migrated_new"] = mrr.apply(is_migrated_new, axis=1)
 
-    # True expansion: starting MRR > 0 and grows, exclude migrated-in orgs
-    organic = mrr[~mrr["_migrated_new"]]
-    exp = organic[(organic["_sm"] > 0) & (organic["_delta"] > 0)].sort_values("_delta", ascending=False)
-    # New MRR: starting MRR == 0 and ends > 0, exclude migrated-in (transferred subs)
-    new_mrr = organic[(organic["_sm"] == 0) & (organic["_em"] > 0)].sort_values("_em", ascending=False)
+    # True expansion: starting MRR > 0 and grows (include all — existing orgs grow organically regardless of migration history)
+    exp = mrr[(mrr["_sm"] > 0) & (mrr["_delta"] > 0)].sort_values("_delta", ascending=False)
+    # New MRR: starting MRR == 0 and ends > 0, exclude migrated-in (transferred subs, not truly new)
+    all_new = mrr[(mrr["_sm"] == 0) & (mrr["_em"] > 0)]
+    new_mrr = all_new[~all_new["_migrated_new"]].sort_values("_em", ascending=False)
 
     return {
         "total_expansion_mrr": money(_s(exp, "_delta")),
