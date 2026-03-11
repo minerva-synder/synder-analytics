@@ -2757,17 +2757,11 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
         _enrich_all_accounts_with_csm(result)
         _trim_response(result)
 
-        # Also compute monthly cohort data and fold into snapshot
-        try:
-            result["monthly_cohort"] = _compute_monthly_cohort()
-        except Exception as _mce:
-            print(f"[snapshot] monthly_cohort compute error: {_mce}", flush=True)
-            result["monthly_cohort"] = {"error": str(_mce)}
-        try:
-            result["monthly_retention_cohort"] = _compute_monthly_retention_cohort()
-        except Exception as _mrce:
-            print(f"[snapshot] monthly_retention_cohort compute error: {_mrce}", flush=True)
-            result["monthly_retention_cohort"] = {"error": str(_mrce)}
+        # Skip heavy monthly cohort computations during snapshot refresh —
+        # they make 24-48 additional Retool calls and take hours.
+        # These are computed on-demand via /api/monthly-cohort endpoints instead.
+        result["monthly_cohort"] = {"skipped": True, "reason": "computed on-demand"}
+        result["monthly_retention_cohort"] = {"skipped": True, "reason": "computed on-demand"}
 
         return result
 
