@@ -2646,12 +2646,17 @@ def api_snapshot_status():
     })
 
 
-def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None):
+def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, override_start_date=None):
     """Core logic: call Retool and build analysis JSON (used by fetch-data and snapshot-refresh)."""
-    # Read date range from query params or override
-    _json_body = request.get_json(silent=True) or {}
-    start_date = request.args.get("start") or _json_body.get("start")
-    end_date = override_end_date or request.args.get("end") or _json_body.get("end")
+    # Read date range from query params or override (request context may not be available in bg threads)
+    try:
+        _json_body = request.get_json(silent=True) or {}
+        start_date = override_start_date or request.args.get("start") or _json_body.get("start")
+        end_date = override_end_date or request.args.get("end") or _json_body.get("end")
+    except RuntimeError:
+        # No request context (background thread)
+        start_date = override_start_date
+        end_date = override_end_date
     payload = {}
     if start_date: payload["start_date"] = start_date
     if end_date: payload["end_date"] = end_date
