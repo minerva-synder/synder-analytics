@@ -2575,13 +2575,41 @@ def api_snapshot_get():
     return jsonify({"success": True, **snap})
 
 
+_refresh_status = {}  # month_key -> {"status": "running"|"done"|"error", ...}
+
+def _do_snapshot_refresh_bg(override_end, app_ctx):
+    """Background thread: fetch from Retool and save snapshot."""
+    from datetime import datetime as _dt
+    with app_ctx:
+        if override_end:
+            try:
+                month_key = _dt.strptime(override_end, "%Y-%m-%d").strftime("%Y-%m")
+            except Exception:
+                month_key = _dt.utcnow().strftime("%Y-%m")
+        else:
+            month_key = _dt.utcnow().strftime("%Y-%m")
+        _refresh_status[month_key] = {"status": "running", "started_at": _dt.utcnow().isoformat()}
+        try:
+            res = _fetch_and_analyze_from_retool(force_refresh=True, override_end_date=override_end)
+            if res.get("success"):
+                payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
+                _save_snapshot(payload, year_month=month_key)
+                _prune_old_snapshots(keep_months=4)
+                _refresh_status[month_key] = {"status": "done", "finished_at": _dt.utcnow().isoformat(), "available_months": _list_available_snapshots()}
+            else:
+                _refresh_status[month_key] = {"status": "error", "detail": res}
+        except Exception as e:
+            import traceback as _tb
+            _refresh_status[month_key] = {"status": "error", "detail": str(e), "trace": _tb.format_exc()[-500:]}
+
+
 @app.route("/api/snapshot-refresh", methods=["POST"])
 def api_snapshot_refresh():
-    """Admin-triggered snapshot refresh. Synchronous — refreshes ONE month per call.
-    
+    """Admin-triggered snapshot refresh. Async — returns 202 immediately, runs in background.
+
     Pass JSON {"end": "YYYY-MM-DD"} to refresh a specific month.
     Without "end", refreshes the current month.
-    To refresh multiple months, call this endpoint multiple times with different end dates.
+    Poll /api/snapshot-status to check available months and refresh progress.
     """
     auth = request.headers.get("X-Admin-Key", "")
     if auth != "AdminSynderAnalytics!":
@@ -2590,29 +2618,20 @@ def api_snapshot_refresh():
         body = request.get_json(silent=True) or {}
         override_end = request.args.get("end") or body.get("end") or body.get("end_date")
 
-        res = _fetch_and_analyze_from_retool(force_refresh=True, override_end_date=override_end)
-        if res.get("success"):
-            # Determine month key from the result
-            from datetime import datetime as _dt
-            if override_end:
-                try:
-                    month_key = _dt.strptime(override_end, "%Y-%m-%d").strftime("%Y-%m")
-                except Exception:
-                    month_key = _dt.utcnow().strftime("%Y-%m")
-            else:
+        import threading
+        t = threading.Thread(target=_do_snapshot_refresh_bg, args=(override_end, app.app_context()), daemon=True)
+        t.start()
+
+        from datetime import datetime as _dt
+        if override_end:
+            try:
+                month_key = _dt.strptime(override_end, "%Y-%m-%d").strftime("%Y-%m")
+            except Exception:
                 month_key = _dt.utcnow().strftime("%Y-%m")
-            
-            payload = {"fetched_at": pd.Timestamp.now().isoformat(), "result": res}
-            _save_snapshot(payload, year_month=month_key)
-            _prune_old_snapshots(keep_months=4)  # current + 3 previous
-            
-            return jsonify({
-                "success": True,
-                "month": month_key,
-                "available_months": _list_available_snapshots()
-            })
         else:
-            return jsonify(res), 500
+            month_key = _dt.utcnow().strftime("%Y-%m")
+
+        return jsonify({"accepted": True, "month": month_key, "message": "Refresh started in background. Poll /api/snapshot-status to check progress."}), 202
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2620,9 +2639,10 @@ def api_snapshot_refresh():
 
 @app.route("/api/snapshot-status", methods=["GET"])
 def api_snapshot_status():
-    """List available month snapshots."""
+    """List available month snapshots and any in-progress refresh jobs."""
     return jsonify({
-        "available_months": _list_available_snapshots()
+        "available_months": _list_available_snapshots(),
+        "refresh_jobs": _refresh_status,
     })
 
 
