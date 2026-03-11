@@ -893,14 +893,14 @@ def enrich_sandbox(sb, mrr, orgs):
 
 
 def is_sub_migrated(row):
-    """Return True if org was subscription-migrated — exclude from churn.
-    We no longer use TRIAL_EXPIRED alone because it also captures real trial expirations
-    (actual churn events). Instead require explicit migration fields from Retool DB."""
-    # Check for explicit migration fields from Retool DB
+    """Return True if org was subscription-migrated TO another org — exclude from churn.
+    Only `migrated_to` and `migration_org_id` indicate this org's subscription moved
+    elsewhere (so its $0 end_mrr isn't real churn).
+    `migrated_from` means this org received a migration — the org itself is still active
+    and can still churn legitimately, so we don't exclude it."""
     migrated_to = str(row.get("migrated_to", "") or "").strip()
-    migrated_from = str(row.get("migrated_from", "") or "").strip()
     migration_org_id = str(row.get("migration_org_id", "") or "").strip()
-    if migrated_to or migrated_from or migration_org_id:
+    if migrated_to or migration_org_id:
         return True
     return False
 
