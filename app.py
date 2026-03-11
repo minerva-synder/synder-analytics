@@ -354,14 +354,8 @@ def norm_plan(raw):
     return plans[0] if plans else None
 
 
-def is_sandbox(p, latest_sub_status=None):
-    """Check if plan is sandbox. Also treats TRIAL_EXPIRED orgs as sandbox
-    regardless of plan name (they're custom configs that never converted)."""
-    if p and p in SANDBOX_PLANS:
-        return True
-    if latest_sub_status and str(latest_sub_status).strip().upper() == "TRIAL_EXPIRED":
-        return True
-    return False
+def is_sandbox(p):
+    return p in SANDBOX_PLANS if p else False
 
 
 def touch_tier(plan):
@@ -739,19 +733,10 @@ def prepare_mrr(mrr):
         mrr["_ep"] = "UNKNOWN"
     mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
     mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
-    # Override plan to SANDBOX for TRIAL_EXPIRED orgs on PRO plan —
-    # these are custom configs / sandbox setups that the Retool view reports as PRO.
-    # Only PRO (not ESSENTIAL/BASIC/etc) because those are legitimate paid plans.
-    if "latest_sub_status" in mrr.columns:
-        trial_expired_pro = (
-            mrr["latest_sub_status"].fillna("").str.strip().str.upper() == "TRIAL_EXPIRED"
-        ) & (
-            mrr["_sp"].isin({"PRO", "LARGE", "PREMIUM"}) | mrr["_ep"].isin({"PRO", "LARGE", "PREMIUM"})
-        )
-        mrr.loc[trial_expired_pro, "_sp"] = "SANDBOX"
-        mrr.loc[trial_expired_pro, "_ep"] = mrr.loc[trial_expired_pro, "_ep"].apply(
-            lambda x: "SANDBOX" if x in {"PRO", "LARGE", "PREMIUM", ""} else x
-        )
+    # NOTE: TRIAL_EXPIRED status cannot reliably identify sandbox orgs —
+    # many legitimate multi-connection PRO orgs also show TRIAL_EXPIRED.
+    # Sandbox identification must happen at the Retool SQL level via the
+    # organization's actual config/plan type, not subscription status.
     return mrr
 
 
