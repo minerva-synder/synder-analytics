@@ -916,13 +916,17 @@ def is_sub_migrated(row, migrated_source_ids=None):
     return False
 
 
-def is_migrated_new(row):
-    """Return True if this org is a migration DESTINATION — exclude from new MRR / expansion.
-    If transfer_org_id or migrated_from is set, this org inherited a subscription
-    from another org; its MRR isn't truly 'new'."""
+def is_migrated_new(row, migrated_source_ids=None):
+    """Return True if this org is a migration DESTINATION for a sub that churned THIS period.
+    We only exclude from new MRR if this org's source (transfer_org_id / migrated_from)
+    is in migrated_source_ids — i.e., the source org dropped to $0 in this period.
+    Historical migrations (source still active) are NOT excluded."""
+    if not migrated_source_ids:
+        return False
     transfer = str(row.get("transfer_org_id", "") or "").strip()
     mig_from = str(row.get("migrated_from", "") or "").strip()
-    return bool(transfer or mig_from)
+    # Only flag as migrated-new if the source is a churned org in this period
+    return (transfer in migrated_source_ids) or (mig_from in migrated_source_ids)
 
 
 def nrr_analysis(mrr, migrated_source_ids=None):
@@ -950,7 +954,7 @@ def nrr_analysis(mrr, migrated_source_ids=None):
     cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     cohort.loc[cohort["_sub_migrated"], "_churned"] = False
     # Also exclude migrated-IN orgs from expansion (their MRR is transferred, not new growth)
-    cohort["_migrated_new"] = cohort.apply(is_migrated_new, axis=1)
+    cohort["_migrated_new"] = cohort.apply(lambda r: is_migrated_new(r, migrated_source_ids), axis=1)
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
@@ -1106,7 +1110,7 @@ def expansion_analysis(mrr, migrated_source_ids=None):
     mrr = prepare_mrr(mrr)
     mrr["_delta"] = mrr["_em"] - mrr["_sm"]
     # Mark migrated-in orgs (exclude from NEW MRR only — their initial revenue is transferred, not new)
-    mrr["_migrated_new"] = mrr.apply(is_migrated_new, axis=1)
+    mrr["_migrated_new"] = mrr.apply(lambda r: is_migrated_new(r, migrated_source_ids), axis=1)
 
     # True expansion: starting MRR > 0 and grows (include all — existing orgs grow organically regardless of migration history)
     exp = mrr[(mrr["_sm"] > 0) & (mrr["_delta"] > 0)].sort_values("_delta", ascending=False)
