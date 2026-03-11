@@ -354,8 +354,14 @@ def norm_plan(raw):
     return plans[0] if plans else None
 
 
-def is_sandbox(p):
-    return p in SANDBOX_PLANS if p else False
+def is_sandbox(p, latest_sub_status=None):
+    """Check if plan is sandbox. Also treats TRIAL_EXPIRED orgs as sandbox
+    regardless of plan name (they're custom configs that never converted)."""
+    if p and p in SANDBOX_PLANS:
+        return True
+    if latest_sub_status and str(latest_sub_status).strip().upper() == "TRIAL_EXPIRED":
+        return True
+    return False
 
 
 def touch_tier(plan):
@@ -733,6 +739,11 @@ def prepare_mrr(mrr):
         mrr["_ep"] = "UNKNOWN"
     mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
     mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
+    # Override plan to SANDBOX for TRIAL_EXPIRED orgs (custom configs that never converted)
+    if "latest_sub_status" in mrr.columns:
+        trial_expired = mrr["latest_sub_status"].fillna("").str.strip().str.upper() == "TRIAL_EXPIRED"
+        mrr.loc[trial_expired, "_sp"] = "SANDBOX"
+        mrr.loc[trial_expired, "_ep"] = "SANDBOX"
     return mrr
 
 
@@ -2746,7 +2757,17 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
                     is_addon = p in ADDON_PLANS
                     return (0 if not is_addon else 1, -float(x.get("mrr", 0) or 0))
                 primary = min(rlist, key=_plan_sort_key)
-                total_mrr = sum(float(x.get("mrr", 0) or 0) for x in rlist)
+                # Deduplicate identical (plan, mrr) rows before summing —
+                # Retool view can return duplicate rows per integration/connection.
+                # Only sum across DISTINCT (plan, mrr) combinations to avoid inflating MRR.
+                seen = set()
+                unique_mrr_rows = []
+                for x in rlist:
+                    key = (str(x.get("plan", "")).upper(), round(float(x.get("mrr", 0) or 0), 2))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_mrr_rows.append(x)
+                total_mrr = sum(float(x.get("mrr", 0) or 0) for x in unique_mrr_rows)
                 primary = dict(primary)
                 primary["mrr"] = total_mrr
                 result[oid] = primary
