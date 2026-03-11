@@ -892,20 +892,40 @@ def enrich_sandbox(sb, mrr, orgs):
     return sb
 
 
-def is_sub_migrated(row):
+def is_sub_migrated(row, migrated_source_ids=None):
     """Return True if org was subscription-migrated TO another org — exclude from churn.
-    Only `migrated_to` and `migration_org_id` indicate this org's subscription moved
-    elsewhere (so its $0 end_mrr isn't real churn).
-    `migrated_from` means this org received a migration — the org itself is still active
-    and can still churn legitimately, so we don't exclude it."""
+
+    Detection methods (any match → migration):
+    1. `migrated_to` or `migration_org_id` set on this org → it moved somewhere
+    2. This org's ID appears in `migrated_source_ids` → another org has
+       `transfer_org_id` or `migrated_from` pointing to this org (the destination
+       org exists in the end snapshot, proving the sub moved, not churned)
+
+    `migrated_from` on THIS org means it received a migration — the org itself
+    can still churn legitimately, so we don't exclude it by that alone.
+    """
     migrated_to = str(row.get("migrated_to", "") or "").strip()
     migration_org_id = str(row.get("migration_org_id", "") or "").strip()
     if migrated_to or migration_org_id:
         return True
+    # Check if this org is the SOURCE of a migration (destination exists in end snapshot)
+    if migrated_source_ids:
+        org_id = str(row.get("org_id", "") or "").strip()
+        if org_id in migrated_source_ids:
+            return True
     return False
 
 
-def nrr_analysis(mrr):
+def is_migrated_new(row):
+    """Return True if this org is a migration DESTINATION — exclude from new MRR / expansion.
+    If transfer_org_id or migrated_from is set, this org inherited a subscription
+    from another org; its MRR isn't truly 'new'."""
+    transfer = str(row.get("transfer_org_id", "") or "").strip()
+    mig_from = str(row.get("migrated_from", "") or "").strip()
+    return bool(transfer or mig_from)
+
+
+def nrr_analysis(mrr, migrated_source_ids=None):
     mrr = prepare_mrr(mrr)
     # NRR is calculated on an existing revenue base only:
     # - exclude new MRR (start_mrr == 0)
@@ -926,16 +946,19 @@ def nrr_analysis(mrr):
 
     starting = _s(cohort, "_sm")
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
-    # Exclude sub-migrated orgs from churn (TRIAL_EXPIRED latest_sub_status = Synder-migrated, not voluntary)
-    if "latest_sub_status" in cohort.columns:
-        cohort["_sub_migrated"] = cohort.apply(is_sub_migrated, axis=1)
-        cohort.loc[cohort["_sub_migrated"], "_churned"] = False
+    # Exclude sub-migrated orgs from churn (their sub moved to a new org, not real churn)
+    cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
+    cohort.loc[cohort["_sub_migrated"], "_churned"] = False
+    # Also exclude migrated-IN orgs from expansion (their MRR is transferred, not new growth)
+    cohort["_migrated_new"] = cohort.apply(is_migrated_new, axis=1)
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
     active = cohort[~cohort["_churned"]]
-    exp = active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
-    contr = active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
+    # For expansion/contraction, exclude migrated-in orgs (their delta is transfer, not organic)
+    organic_active = active[~active["_migrated_new"]]
+    exp = organic_active.apply(lambda r: max(0, r["_em"] - r["_sm"]), axis=1).sum()
+    contr = organic_active.apply(lambda r: max(0, r["_sm"] - r["_em"]), axis=1).sum()
 
     breakdown = []
     for plan in sorted(cohort["_sp"].dropna().unique()):
@@ -999,7 +1022,7 @@ def nrr_analysis(mrr):
     }
 
 
-def retention_analysis(mrr, orgs=None):
+def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
     """Compute logo retention and movement stats for the Retention section."""
     mrr = prepare_mrr(mrr)
     today = pd.Timestamp.now().normalize()
@@ -1010,8 +1033,7 @@ def retention_analysis(mrr, orgs=None):
 
     # Churned: had MRR at start, 0 at end — exclude sub-migrated orgs
     churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
-    if "latest_sub_status" in start_active.columns:
-        churned_mask = churned_mask & ~start_active.apply(is_sub_migrated, axis=1)
+    churned_mask = churned_mask & ~start_active.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     churned = start_active[churned_mask]
     churned_count = len(churned)
 
@@ -1082,14 +1104,17 @@ def retention_analysis(mrr, orgs=None):
     }
 
 
-def expansion_analysis(mrr):
+def expansion_analysis(mrr, migrated_source_ids=None):
     mrr = prepare_mrr(mrr)
     mrr["_delta"] = mrr["_em"] - mrr["_sm"]
+    # Mark migrated-in orgs (exclude from new MRR — their revenue is transferred, not new)
+    mrr["_migrated_new"] = mrr.apply(is_migrated_new, axis=1)
 
-    # True expansion: starting MRR > 0 and grows
-    exp = mrr[(mrr["_sm"] > 0) & (mrr["_delta"] > 0)].sort_values("_delta", ascending=False)
-    # New MRR: starting MRR == 0 and ends > 0 (should NOT be counted as expansion)
-    new_mrr = mrr[(mrr["_sm"] == 0) & (mrr["_em"] > 0)].sort_values("_em", ascending=False)
+    # True expansion: starting MRR > 0 and grows, exclude migrated-in orgs
+    organic = mrr[~mrr["_migrated_new"]]
+    exp = organic[(organic["_sm"] > 0) & (organic["_delta"] > 0)].sort_values("_delta", ascending=False)
+    # New MRR: starting MRR == 0 and ends > 0, exclude migrated-in (transferred subs)
+    new_mrr = organic[(organic["_sm"] == 0) & (organic["_em"] > 0)].sort_values("_em", ascending=False)
 
     return {
         "total_expansion_mrr": money(_s(exp, "_delta")),
@@ -1116,7 +1141,7 @@ def _filter_mrr_by_plans(mrr, plan_set, use_start=True):
     return mrr[mask].copy()
 
 
-def cohort_nrr_analysis(mrr, plan_set, label=""):
+def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     """Run NRR analysis filtered to orgs whose start plan is in plan_set."""
     mrr = prepare_mrr(mrr)
     cohort = mrr[(mrr["_sp"].isin(plan_set)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
@@ -1134,9 +1159,8 @@ def cohort_nrr_analysis(mrr, plan_set, label=""):
 
     starting = _s(cohort, "_sm")
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
-    if "latest_sub_status" in cohort.columns:
-        cohort["_sub_migrated"] = cohort.apply(is_sub_migrated, axis=1)
-        cohort.loc[cohort["_sub_migrated"], "_churned"] = False
+    cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
+    cohort.loc[cohort["_sub_migrated"], "_churned"] = False
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
@@ -1181,7 +1205,7 @@ def cohort_expansion_analysis(mrr, plan_set, label=""):
     }
 
 
-def cohort_retention_analysis(mrr, plan_set, label=""):
+def cohort_retention_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     """Run logo retention filtered to a cohort."""
     mrr = prepare_mrr(mrr)
     start_active = mrr[(mrr["_sm"] > 0) & (mrr["_sp"].isin(plan_set))].copy()
@@ -1192,9 +1216,8 @@ def cohort_retention_analysis(mrr, plan_set, label=""):
                 "churned_accounts": [], "expansion_mrr_total": 0, "new_mrr_total": 0}
 
     churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
-    # Exclude sub-migrated orgs from churn (TRIAL_EXPIRED = Synder-initiated migration, not voluntary)
-    if "latest_sub_status" in start_active.columns:
-        churned_mask = churned_mask & ~start_active.apply(is_sub_migrated, axis=1)
+    # Exclude sub-migrated orgs from churn
+    churned_mask = churned_mask & ~start_active.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     churned = start_active[churned_mask]
     churned_count = len(churned)
     retained_count = start_count - churned_count
@@ -1272,23 +1295,24 @@ def _sandbox_retention_analysis(mrr):
     }
 
 
-def build_cohort_data(mrr):
+def build_cohort_data(mrr, migrated_source_ids=None):
     """Build cohort-specific analysis for all three cohorts + NRR touch tiers."""
+    _msi = migrated_source_ids
     cohorts = {
         "high_med": {
-            "nrr": cohort_nrr_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
+            "nrr": cohort_nrr_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch", migrated_source_ids=_msi),
             "expansion": cohort_expansion_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
-            "retention": cohort_retention_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch"),
+            "retention": cohort_retention_analysis(mrr, COHORT_HIGH_MED, "High/Med Touch", migrated_source_ids=_msi),
         },
         "essential": {
-            "nrr": cohort_nrr_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
+            "nrr": cohort_nrr_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale", migrated_source_ids=_msi),
             "expansion": cohort_expansion_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
-            "retention": cohort_retention_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale"),
+            "retention": cohort_retention_analysis(mrr, COHORT_ESSENTIAL, "Essential/Scale", migrated_source_ids=_msi),
         },
         "basic": {
-            "nrr": cohort_nrr_analysis(mrr, COHORT_BASIC, "Basic"),
+            "nrr": cohort_nrr_analysis(mrr, COHORT_BASIC, "Basic", migrated_source_ids=_msi),
             "expansion": cohort_expansion_analysis(mrr, COHORT_BASIC, "Basic"),
-            "retention": cohort_retention_analysis(mrr, COHORT_BASIC, "Basic"),
+            "retention": cohort_retention_analysis(mrr, COHORT_BASIC, "Basic", migrated_source_ids=_msi),
         },
         "sandbox": {
             "nrr": _sandbox_nrr_analysis(mrr),
@@ -1297,8 +1321,8 @@ def build_cohort_data(mrr):
         },
     }
     nrr_by_touch = {
-        "high_med": cohort_nrr_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
-        "low": cohort_nrr_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)"),
+        "high_med": cohort_nrr_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch", migrated_source_ids=_msi),
+        "low": cohort_nrr_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)", migrated_source_ids=_msi),
     }
     expansion_by_touch = {
         "high_med": cohort_expansion_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
@@ -2260,20 +2284,20 @@ def build_dataframes_from_rows(rows):
     return mrr_df, orgs_df, warns + mrr_warns
 
 
-def run_analysis_on_dataframes(mrr_df, orgs_df, warns):
+def run_analysis_on_dataframes(mrr_df, orgs_df, warns, migrated_source_ids=None):
     """Run full analysis suite and return the JSON-serializable result dict."""
     sb, sw = sandbox_analysis(mrr_df)
     warns += sw
     if orgs_df is not None and not orgs_df.empty:
         sb = enrich_sandbox(sb, mrr_df, orgs_df)
 
-    nrr = nrr_analysis(mrr_df)
-    exp = expansion_analysis(mrr_df)
-    ret = retention_analysis(mrr_df, orgs_df if orgs_df is not None and not orgs_df.empty else None)
+    nrr = nrr_analysis(mrr_df, migrated_source_ids=migrated_source_ids)
+    exp = expansion_analysis(mrr_df, migrated_source_ids=migrated_source_ids)
+    ret = retention_analysis(mrr_df, orgs_df if orgs_df is not None and not orgs_df.empty else None, migrated_source_ids=migrated_source_ids)
 
     # Cohort breakdowns
     try:
-        cohort_data = build_cohort_data(mrr_df)
+        cohort_data = build_cohort_data(mrr_df, migrated_source_ids=migrated_source_ids)
     except Exception:
         cohort_data = None
 
@@ -2769,8 +2793,19 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
             }
             rows.append(row)
 
+        # Build set of org IDs that are migration sources (another org in end_rows
+        # has transfer_org_id or migrated_from pointing to them)
+        migrated_source_ids = set()
+        for r in end_rows:
+            tid = str(r.get("transfer_org_id", "") or "").strip()
+            mfrom = str(r.get("migrated_from", "") or "").strip()
+            if tid:
+                migrated_source_ids.add(tid)
+            if mfrom:
+                migrated_source_ids.add(mfrom)
+
         mrr_df, orgs_df, warns = build_dataframes_from_rows(rows)
-        result = run_analysis_on_dataframes(mrr_df, orgs_df, warns)
+        result = run_analysis_on_dataframes(mrr_df, orgs_df, warns, migrated_source_ids=migrated_source_ids)
         _enrich_all_accounts_with_csm(result)
         _trim_response(result)
 
