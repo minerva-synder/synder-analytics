@@ -739,11 +739,19 @@ def prepare_mrr(mrr):
         mrr["_ep"] = "UNKNOWN"
     mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
     mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
-    # Override plan to SANDBOX for TRIAL_EXPIRED orgs (custom configs that never converted)
+    # Override plan to SANDBOX for TRIAL_EXPIRED orgs on PRO plan —
+    # these are custom configs / sandbox setups that the Retool view reports as PRO.
+    # Only PRO (not ESSENTIAL/BASIC/etc) because those are legitimate paid plans.
     if "latest_sub_status" in mrr.columns:
-        trial_expired = mrr["latest_sub_status"].fillna("").str.strip().str.upper() == "TRIAL_EXPIRED"
-        mrr.loc[trial_expired, "_sp"] = "SANDBOX"
-        mrr.loc[trial_expired, "_ep"] = "SANDBOX"
+        trial_expired_pro = (
+            mrr["latest_sub_status"].fillna("").str.strip().str.upper() == "TRIAL_EXPIRED"
+        ) & (
+            mrr["_sp"].isin({"PRO", "LARGE", "PREMIUM"}) | mrr["_ep"].isin({"PRO", "LARGE", "PREMIUM"})
+        )
+        mrr.loc[trial_expired_pro, "_sp"] = "SANDBOX"
+        mrr.loc[trial_expired_pro, "_ep"] = mrr.loc[trial_expired_pro, "_ep"].apply(
+            lambda x: "SANDBOX" if x in {"PRO", "LARGE", "PREMIUM", ""} else x
+        )
     return mrr
 
 
