@@ -250,20 +250,23 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 
         <!-- NRR by Touch Tier -->
         <div class="section-title">2b. NRR by Touch Tier</div>
+        <!-- Blended: compact banner row -->
+        <div class="alert alert-secondary py-2 px-3 mb-3 d-flex align-items-center gap-4" id="nrrTouchBlendedBanner" style="font-size:0.9rem;">
+          <strong>🏢 Blended NRR (all tiers):</strong>
+          <span id="nrrTouchBlendedInline" class="text-muted">—</span>
+        </div>
+        <!-- Per-tier full cards -->
         <div class="row g-3 mb-3">
-          <div class="col-md-4">
-            <h6 class="text-muted mb-2">🏢 Blended (All Tiers)</h6>
-            <div class="row g-3 mb-2" id="nrrTouchBlended"></div>
-          </div>
-          <div class="col-md-4">
+          <div class="col-md-6">
             <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Enterprise)</h6>
             <div class="row g-3 mb-2" id="nrrTouchHighMed"></div>
           </div>
-          <div class="col-md-4">
+          <div class="col-md-6">
             <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
             <div class="row g-3 mb-2" id="nrrTouchLow"></div>
           </div>
         </div>
+        <div style="display:none" id="nrrTouchBlended"></div>
 
         <!-- 3. Expansion MRR -->
         <div class="section-title">3. Expansion MRR
@@ -274,24 +277,31 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
 
         <!-- Expansion by Touch Tier -->
         <div class="section-title">3b. Expansion by Touch Tier</div>
-        <div class="row g-3 mb-3">
-          <div class="col-md-3">
-            <h6 class="text-muted mb-2">High/Med Touch</h6>
-            <div class="row g-3 mb-2" id="expTouchHighMed"></div>
+        <!-- Primary tiers: full-width cards -->
+        <div class="row g-3 mb-2">
+          <div class="col-md-6">
+            <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Enterprise)</h6>
+            <div class="row g-3" id="expTouchHighMed"></div>
           </div>
-          <div class="col-md-3">
+          <div class="col-md-6">
             <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
-            <div class="row g-3 mb-2" id="expTouchLow"></div>
-          </div>
-          <div class="col-md-3">
-            <h6 class="text-muted mb-2">Sandbox</h6>
-            <div class="row g-3 mb-2" id="expTouchSandbox"></div>
-          </div>
-          <div class="col-md-3">
-            <h6 class="text-muted mb-2">Other</h6>
-            <div class="row g-3 mb-2" id="expTouchOther"></div>
+            <div class="row g-3" id="expTouchLow"></div>
           </div>
         </div>
+        <!-- Secondary tiers: compact inline summary -->
+        <div class="row g-2 mt-1 mb-3" id="expTouchSecondary" style="font-size:0.85rem;">
+          <div class="col-md-6">
+            <span class="text-muted me-2">Sandbox:</span>
+            <span id="expTouchSandboxInline" class="text-secondary">—</span>
+          </div>
+          <div class="col-md-6">
+            <span class="text-muted me-2">Other:</span>
+            <span id="expTouchOtherInline" class="text-secondary">—</span>
+          </div>
+        </div>
+        <!-- Hidden detail containers still needed for drill-down -->
+        <div style="display:none" id="expTouchSandbox"></div>
+        <div style="display:none" id="expTouchOther"></div>
 
         <!-- 4. Retention Cohorts -->
         <div class="section-title">4. Retention by Plan Cohort</div>
@@ -1070,7 +1080,16 @@ function renderCohortData(cd) {
 
   // NRR by touch tier
   if (cd.nrr_by_touch) {
-    if (cd.nrr_by_touch.blended) renderNrrTouchTier('nrrTouchBlended', cd.nrr_by_touch.blended, 'ntt_blended');
+    if (cd.nrr_by_touch.blended) {
+      const b = cd.nrr_by_touch.blended;
+      const nrrColor = (b.nrr_pct || 0) >= 100 ? '#198754' : '#dc3545';
+      $('nrrTouchBlendedInline').innerHTML =
+        `<strong style="color:${nrrColor};font-size:1.05rem">${pct(b.nrr_pct)}</strong> &nbsp;|&nbsp; ` +
+        `Start MRR <strong>${fmt(b.starting_mrr)}</strong> &nbsp;|&nbsp; ` +
+        `${num(b.start_count)} orgs &nbsp;|&nbsp; ` +
+        `Expansion <span class="text-success">${fmt(b.expansion_mrr)}</span> &nbsp;|&nbsp; ` +
+        `Churn <span class="text-danger">${fmt(b.churn_mrr)}</span>`;
+    }
     renderNrrTouchTier('nrrTouchHighMed', cd.nrr_by_touch.high_med, 'ntt_hm');
     renderNrrTouchTier('nrrTouchLow', cd.nrr_by_touch.low, 'ntt_low');
   }
@@ -1079,8 +1098,21 @@ function renderCohortData(cd) {
   if (cd.expansion_by_touch) {
     renderExpTouchTier('expTouchHighMed', cd.expansion_by_touch.high_med, 'ett_hm');
     renderExpTouchTier('expTouchLow', cd.expansion_by_touch.low, 'ett_low');
-    if (cd.expansion_by_touch.sandbox) renderExpTouchTier('expTouchSandbox', cd.expansion_by_touch.sandbox, 'ett_sb');
-    if (cd.expansion_by_touch.other) renderExpTouchTier('expTouchOther', cd.expansion_by_touch.other, 'ett_oth');
+    // Sandbox & Other: compact inline summary (full cards too cramped at 4 cols)
+    function expTierInline(data) {
+      if (!data) return '—';
+      return `Expansion <strong>${fmt(data.total_expansion_mrr)}</strong> (${num(data.expander_count)} accts) &nbsp;|&nbsp; New MRR <strong>${fmt(data.new_mrr_total)}</strong> (${num(data.new_mrr_count)} accts)`;
+    }
+    if (cd.expansion_by_touch.sandbox) {
+      setDetails('ett_sb', 'Sandbox — expanders', cd.expansion_by_touch.sandbox.all_expanders || []);
+      setDetails('ett_sb_new', 'Sandbox — new MRR', cd.expansion_by_touch.sandbox.new_mrr_accounts || []);
+      $('expTouchSandboxInline').innerHTML = expTierInline(cd.expansion_by_touch.sandbox);
+    }
+    if (cd.expansion_by_touch.other) {
+      setDetails('ett_oth', 'Other — expanders', cd.expansion_by_touch.other.all_expanders || []);
+      setDetails('ett_oth_new', 'Other — new MRR', cd.expansion_by_touch.other.new_mrr_accounts || []);
+      $('expTouchOtherInline').innerHTML = expTierInline(cd.expansion_by_touch.other);
+    }
   }
 
   // Retention cohort tabs

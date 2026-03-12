@@ -968,6 +968,19 @@ def nrr_analysis(mrr, migrated_source_ids=None):
     # Exclude sub-migrated orgs from churn (their sub moved to a new org, not real churn)
     cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     cohort.loc[cohort["_sub_migrated"], "_churned"] = False
+    # Prior-period churn filter: exclude orgs whose subscription/cancellation ended
+    # BEFORE the period start date (they leaked into start snapshot via billing grace period)
+    if "snapshot_start_date" in cohort.columns:
+        _period_starts = cohort["snapshot_start_date"].dropna()
+        if not _period_starts.empty:
+            try:
+                _ps = pd.Timestamp(_period_starts.iloc[0])
+                _se = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
+                _cd = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
+                _prior = (_se.notna() & (_se < _ps)) | (_cd.notna() & (_cd < _ps))
+                cohort.loc[_prior & cohort["_churned"], "_churned"] = False
+            except Exception:
+                pass
     # Also exclude migrated-IN orgs from expansion (their MRR is transferred, not new growth)
     cohort["_migrated_new"] = cohort.apply(lambda r: is_migrated_new(r, migrated_source_ids), axis=1)
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
@@ -1048,9 +1061,32 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
     start_active = mrr[mrr["_sm"] > 0].copy()
     start_count = len(start_active)
 
+    # Derive period start date from snapshot_start_date column (set during merge)
+    period_start = None
+    if "snapshot_start_date" in start_active.columns:
+        _sd = start_active["snapshot_start_date"].dropna()
+        if not _sd.empty:
+            try:
+                period_start = pd.Timestamp(_sd.iloc[0])
+            except Exception:
+                period_start = None
+
     # Churned: had MRR at start, 0 at end — exclude sub-migrated orgs
     churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
     churned_mask = churned_mask & ~start_active.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
+
+    # Prior-period churn filter: if subscription_end_date OR cancellation_date is
+    # before the period start, this org already churned last period but leaked into
+    # the start snapshot via billing grace period. Exclude from current period churn.
+    if period_start is not None and "subscription_end_date" in start_active.columns:
+        _se = parse_dates(start_active["subscription_end_date"])
+        _cd = parse_dates(start_active.get("cancellation_date", pd.Series(dtype="object")))
+        prior_churn_mask = (
+            (_se.notna() & (_se < period_start)) |
+            (_cd.notna() & (_cd < period_start))
+        )
+        churned_mask = churned_mask & ~prior_churn_mask
+
     churned = start_active[churned_mask]
     churned_count = len(churned)
 
@@ -1178,6 +1214,18 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
     cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     cohort.loc[cohort["_sub_migrated"], "_churned"] = False
+    # Prior-period churn filter: subscription/cancellation ended before period start
+    if "snapshot_start_date" in cohort.columns:
+        _pss = cohort["snapshot_start_date"].dropna()
+        if not _pss.empty:
+            try:
+                _ps2 = pd.Timestamp(_pss.iloc[0])
+                _se2 = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
+                _cd2 = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
+                _prior2 = (_se2.notna() & (_se2 < _ps2)) | (_cd2.notna() & (_cd2 < _ps2))
+                cohort.loc[_prior2 & cohort["_churned"], "_churned"] = False
+            except Exception:
+                pass
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
