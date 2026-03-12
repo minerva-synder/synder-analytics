@@ -382,7 +382,8 @@ def parse_dates(s):
 
 def _parse_dates_naive(s):
     """Parse dates to tz-naive datetime64[ns], safe for comparisons without UTC conversion."""
-    return pd.to_datetime(s, errors="coerce").astype("datetime64[ns]")
+    dt = pd.to_datetime(s, errors="coerce", utc=True)
+    return dt.dt.tz_localize(None).astype("datetime64[ns]")
 
 
 def money(v):
@@ -2793,7 +2794,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v4-numpy",
+        "code_version": "2026-03-12-v5",
     })
 
 
