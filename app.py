@@ -334,6 +334,8 @@ def accounts_table(df, start_col="_sm", end_col="_em"):
         if "last_active_mrr" in df.columns:
             rec["last_active_mrr"] = money(r.get("last_active_mrr", 0))
             rec["last_active_date"] = r.get("last_active_date", None)
+        if "_is_sandbox_db" in df.columns:
+            rec["is_sandbox_db"] = bool(r.get("_is_sandbox_db", False))
         out.append(rec)
     return out
 
@@ -956,7 +958,7 @@ def nrr_analysis(mrr, migrated_source_ids=None):
             axis=1
         )
     # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
-    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort.get("_is_sandbox_db", False).astype(bool))].copy()
+    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort["_is_sandbox_db"] if "_is_sandbox_db" in cohort.columns else False)].copy()
     if cohort.empty:
         return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": [],
                 "validation_warnings": ["NRR cohort is empty — check that NRR_PLANS includes your plan types and start_mrr > 0"]}
@@ -1166,7 +1168,7 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     else:
         cohort["_last_plan"] = cohort["_ep"]
     # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
-    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort.get("_is_sandbox_db", False).astype(bool))].copy()
+    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort["_is_sandbox_db"] if "_is_sandbox_db" in cohort.columns else False)].copy()
     if cohort.empty:
         return {"label": label, "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
                 "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
