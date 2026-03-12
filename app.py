@@ -13,6 +13,7 @@ import html as _html
 from datetime import datetime, date, timedelta
 from io import BytesIO, StringIO
 
+import numpy as np
 import pandas as pd
 import requests as _requests_lib
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
@@ -378,6 +379,10 @@ def touch_tier(plan):
 
 def parse_dates(s):
     return pd.to_datetime(s, errors="coerce", utc=True).dt.tz_localize(None)
+
+def _parse_dates_naive(s):
+    """Parse dates to tz-naive datetime64[ns], safe for comparisons without UTC conversion."""
+    return pd.to_datetime(s, errors="coerce").astype("datetime64[ns]")
 
 
 def money(v):
@@ -974,9 +979,9 @@ def nrr_analysis(mrr, migrated_source_ids=None):
         _period_starts = cohort["snapshot_start_date"].dropna()
         if not _period_starts.empty:
             try:
-                _ps = pd.Timestamp(str(_period_starts.iloc[0]))
-                _se = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
-                _cd = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
+                _ps = np.datetime64(pd.Timestamp(str(_period_starts.iloc[0])), "ns")
+                _se = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
+                _cd = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
                 _prior = (_se.notna() & (_se < _ps)) | (_cd.notna() & (_cd < _ps))
                 cohort.loc[_prior & cohort["_churned"], "_churned"] = False
             except Exception:
@@ -1067,7 +1072,7 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
         _sd = start_active["snapshot_start_date"].dropna()
         if not _sd.empty:
             try:
-                period_start = pd.Timestamp(str(_sd.iloc[0]))
+                period_start = np.datetime64(pd.Timestamp(str(_sd.iloc[0])), "ns")
             except Exception:
                 period_start = None
 
@@ -1079,8 +1084,8 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
     # before the period start, this org already churned last period but leaked into
     # the start snapshot via billing grace period. Exclude from current period churn.
     if period_start is not None and "subscription_end_date" in start_active.columns:
-        _se = parse_dates(start_active["subscription_end_date"])
-        _cd = parse_dates(start_active.get("cancellation_date", pd.Series(dtype="object")))
+        _se = _parse_dates_naive(start_active["subscription_end_date"])
+        _cd = _parse_dates_naive(start_active.get("cancellation_date", pd.Series(dtype="object")))
         prior_churn_mask = (
             (_se.notna() & (_se < period_start)) |
             (_cd.notna() & (_cd < period_start))
@@ -1219,9 +1224,9 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
         _pss = cohort["snapshot_start_date"].dropna()
         if not _pss.empty:
             try:
-                _ps2 = pd.Timestamp(str(_pss.iloc[0]))
-                _se2 = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
-                _cd2 = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
+                _ps2 = np.datetime64(pd.Timestamp(str(_pss.iloc[0])), "ns")
+                _se2 = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
+                _cd2 = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
                 _prior2 = (_se2.notna() & (_se2 < _ps2)) | (_cd2.notna() & (_cd2 < _ps2))
                 cohort.loc[_prior2 & cohort["_churned"], "_churned"] = False
             except Exception:
