@@ -335,6 +335,15 @@ def accounts_table(df, start_col="_sm", end_col="_em"):
         if "last_active_mrr" in df.columns:
             rec["last_active_mrr"] = money(r.get("last_active_mrr", 0))
             rec["last_active_date"] = r.get("last_active_date", None)
+        # Include subscription timing fields when present (useful for audits)
+        if "subscription_end_date" in df.columns:
+            rec["subscription_end_date"] = r.get("subscription_end_date", None)
+        if "cancellation_date" in df.columns:
+            rec["cancellation_date"] = r.get("cancellation_date", None)
+        if "snapshot_start_date" in df.columns:
+            rec["snapshot_start_date"] = r.get("snapshot_start_date", None)
+        if "snapshot_end_date" in df.columns:
+            rec["snapshot_end_date"] = r.get("snapshot_end_date", None)
         if "_is_sandbox_db" in df.columns:
             rec["is_sandbox_db"] = bool(r.get("_is_sandbox_db", False))
         out.append(rec)
@@ -2777,7 +2786,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v8",
+        "code_version": "2026-03-12-v9",
     })
 
 
