@@ -2788,6 +2788,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
+        "code_version": "2026-03-12-v3",
     })
 
 
@@ -2929,7 +2930,7 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
     except Exception as exc:
         import traceback as _tb
         print(f"[fetch-data] Retool webhook error: {exc}\n{_tb.format_exc()}", flush=True)
-        return {"connecting": True, "message": f"Database connecting... ({str(exc)[:180]})"}
+        return {"connecting": True, "message": f"Database connecting... ({str(exc)[:180]})", "traceback": _tb.format_exc()[-800:]}
 
 
 @app.route("/api/fetch-data", methods=["GET", "POST"])
