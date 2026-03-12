@@ -985,19 +985,10 @@ def nrr_analysis(mrr, migrated_source_ids=None):
     # Exclude sub-migrated orgs from churn (their sub moved to a new org, not real churn)
     cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     cohort.loc[cohort["_sub_migrated"], "_churned"] = False
-    # Prior-period churn filter: exclude orgs whose subscription/cancellation ended
-    # BEFORE the period start date (they leaked into start snapshot via billing grace period)
-    if "snapshot_start_date" in cohort.columns:
-        _period_starts = cohort["snapshot_start_date"].dropna()
-        if not _period_starts.empty:
-            try:
-                _ps_str = str(_period_starts.iloc[0])[:10]
-                _se = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
-                _cd = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior = _before_date(_se, _ps_str)
-                cohort.loc[_prior & cohort["_churned"], "_churned"] = False
-            except Exception:
-                pass
+    # NOTE: Do not try to infer "prior-period churn" here based on cancellation/subscription dates.
+    # Those fields are not reliable enough and caused under-counting of churn in practice.
+    # If a specific org appears in the wrong month, the correct fix is to refresh the snapshot
+    # so start/end snapshots reflect the true PaidOrganizationsAtDate state.
     # Also exclude migrated-IN orgs from expansion (their MRR is transferred, not new growth)
     cohort["_migrated_new"] = cohort.apply(lambda r: is_migrated_new(r, migrated_source_ids), axis=1)
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
@@ -1092,15 +1083,8 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
     churned_mask = (start_active["_em"] == 0) | start_active["_ep"].isna()
     churned_mask = churned_mask & ~start_active.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
 
-    # Prior-period churn filter: if subscription_end_date OR cancellation_date is
-    # before the period start, this org already churned last period but leaked into
-    # the start snapshot via billing grace period. Exclude from current period churn.
-    if period_start is not None and "subscription_start_date" in start_active.columns:
-        _ps_str = str(period_start)[:10]
-        _se = _parse_dates_naive(start_active.get("subscription_end_date", pd.Series(dtype="object")))
-        _cd = _parse_dates_naive(start_active.get("cancellation_date", pd.Series(dtype="object")))
-        prior_churn_mask = _before_date(_se, _ps_str)
-        churned_mask = churned_mask & ~prior_churn_mask
+    # NOTE: we intentionally do NOT attempt to exclude "prior-period churn" here based on
+    # subscription/cancellation date fields — they proved unreliable and caused churn under-counting.
 
     churned = start_active[churned_mask]
     churned_count = len(churned)
@@ -1229,18 +1213,8 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     cohort["_churned"] = (cohort["_em"] == 0) | cohort["_ep"].isna()
     cohort["_sub_migrated"] = cohort.apply(lambda r: is_sub_migrated(r, migrated_source_ids), axis=1)
     cohort.loc[cohort["_sub_migrated"], "_churned"] = False
-    # Prior-period churn filter: subscription/cancellation ended before period start
-    if "snapshot_start_date" in cohort.columns:
-        _pss = cohort["snapshot_start_date"].dropna()
-        if not _pss.empty:
-            try:
-                _ps2_str = str(_pss.iloc[0])[:10]
-                _se2 = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
-                _cd2 = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior2 = _before_date(_se2, _ps2_str)
-                cohort.loc[_prior2 & cohort["_churned"], "_churned"] = False
-            except Exception:
-                pass
+    # NOTE: do not attempt prior-period churn exclusions here (see nrr_analysis note).
+
     cohort["_ret"] = cohort.apply(lambda r: 0 if r["_churned"] else r["_em"], axis=1)
     retained = cohort["_ret"].sum()
     churn = _s(cohort[cohort["_churned"]], "_sm")
@@ -2803,7 +2777,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v7",
+        "code_version": "2026-03-12-v8",
     })
 
 
