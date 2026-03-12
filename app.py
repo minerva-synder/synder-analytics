@@ -1202,14 +1202,24 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
 
 def cohort_expansion_analysis(mrr, plan_set, label=""):
     """Run expansion analysis filtered to a cohort.
-    Includes orgs whose end_plan is in the plan set (they belong to this tier now),
-    OR whose start_plan was in the plan set (they were in this tier).
+    Uses start_plan for expansion (existing orgs whose MRR grew): avoids double-counting
+    orgs that crossed tier boundaries (e.g. sandbox→Pro counted in sandbox tier only).
+    Uses end_plan for new MRR (new orgs belong to the tier they joined).
+    Sandbox plans are always excluded from non-sandbox tier new MRR.
     """
     mrr = prepare_mrr(mrr)
-    subset = mrr[mrr["_ep"].isin(plan_set) | mrr["_sp"].isin(plan_set)].copy()
+    is_sandbox_tier = bool(plan_set & SANDBOX_PLANS)
+    subset = mrr.copy()
     subset["_delta"] = subset["_em"] - subset["_sm"]
-    exp = subset[(subset["_sm"] > 0) & (subset["_delta"] > 0)].sort_values("_delta", ascending=False)
-    new_mrr = subset[(subset["_sm"] == 0) & (subset["_em"] > 0)].sort_values("_em", ascending=False)
+    # Expansion: classify by START plan — the org was in this tier and grew
+    exp_base = subset[(subset["_sm"] > 0) & (subset["_delta"] > 0) & subset["_sp"].isin(plan_set)]
+    exp = exp_base.sort_values("_delta", ascending=False)
+    # New MRR: classify by END plan — the org joined this tier fresh
+    new_base = subset[(subset["_sm"] == 0) & (subset["_em"] > 0) & subset["_ep"].isin(plan_set)]
+    # For non-sandbox tiers, exclude sandbox plans from new MRR (they're shown in sandbox section)
+    if not is_sandbox_tier:
+        new_base = new_base[~new_base["_ep"].isin(SANDBOX_PLANS)]
+    new_mrr = new_base.sort_values("_em", ascending=False)
 
     return {
         "label": label,
@@ -1344,6 +1354,22 @@ def build_cohort_data(mrr, migrated_source_ids=None):
     expansion_by_touch = {
         "high_med": cohort_expansion_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
         "low": cohort_expansion_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)"),
+    }
+    # Blended NRR across all tiers (company-wide)
+    hm = nrr_by_touch["high_med"]
+    lw = nrr_by_touch["low"]
+    blended_start = (hm.get("starting_mrr") or 0) + (lw.get("starting_mrr") or 0)
+    blended_end = (hm.get("ending_mrr") or 0) + (lw.get("ending_mrr") or 0)
+    blended_nrr_pct = round(blended_end / blended_start * 100, 2) if blended_start else None
+    nrr_by_touch["blended"] = {
+        "label": "All Tiers (Blended)",
+        "nrr_pct": blended_nrr_pct,
+        "starting_mrr": money(blended_start),
+        "ending_mrr": money(blended_end),
+        "start_count": (hm.get("start_count") or 0) + (lw.get("start_count") or 0),
+        "expansion_mrr": money((hm.get("expansion_mrr") or 0) + (lw.get("expansion_mrr") or 0)),
+        "churn_mrr": money((hm.get("churn_mrr") or 0) + (lw.get("churn_mrr") or 0)),
+        "contraction_mrr": money((hm.get("contraction_mrr") or 0) + (lw.get("contraction_mrr") or 0)),
     }
     return {"cohorts": cohorts, "nrr_by_touch": nrr_by_touch, "expansion_by_touch": expansion_by_touch}
 

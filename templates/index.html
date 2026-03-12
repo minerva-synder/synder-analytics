@@ -251,11 +251,15 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <!-- NRR by Touch Tier -->
         <div class="section-title">2b. NRR by Touch Tier</div>
         <div class="row g-3 mb-3">
-          <div class="col-md-6">
+          <div class="col-md-4">
+            <h6 class="text-muted mb-2">🏢 Blended (All Tiers)</h6>
+            <div class="row g-3 mb-2" id="nrrTouchBlended"></div>
+          </div>
+          <div class="col-md-4">
             <h6 class="text-muted mb-2">High/Med Touch (Pro, Premium, Large, Enterprise)</h6>
             <div class="row g-3 mb-2" id="nrrTouchHighMed"></div>
           </div>
-          <div class="col-md-6">
+          <div class="col-md-4">
             <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
             <div class="row g-3 mb-2" id="nrrTouchLow"></div>
           </div>
@@ -1058,6 +1062,7 @@ function renderCohortData(cd) {
 
   // NRR by touch tier
   if (cd.nrr_by_touch) {
+    if (cd.nrr_by_touch.blended) renderNrrTouchTier('nrrTouchBlended', cd.nrr_by_touch.blended, 'ntt_blended');
     renderNrrTouchTier('nrrTouchHighMed', cd.nrr_by_touch.high_med, 'ntt_hm');
     renderNrrTouchTier('nrrTouchLow', cd.nrr_by_touch.low, 'ntt_low');
   }
