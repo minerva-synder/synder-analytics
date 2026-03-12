@@ -2331,10 +2331,11 @@ _RETOOL_CACHE = {}
 _RETOOL_CACHE_TTL_SEC = int(os.environ.get("RETOOL_CACHE_TTL_SEC", "3600"))  # default 1 hour
 
 
-def fetch_retool_webhook(query_name="organizations", payload=None):
+def fetch_retool_webhook(query_name="organizations", payload=None, skip_cache=False):
     """POST to Retool Workflow webhook and return raw JSON response.
 
     Note: We cache successful responses for a short TTL because the workflow payload can be large/slow.
+    Set skip_cache=True during snapshot refresh to ensure fresh data.
     """
     body = {"query_name": query_name}
     if payload:
@@ -2342,9 +2343,10 @@ def fetch_retool_webhook(query_name="organizations", payload=None):
 
     cache_key = (query_name, tuple(sorted((payload or {}).items())))
     now = time.time()
-    cached = _RETOOL_CACHE.get(cache_key)
-    if cached and (now - cached.get("ts", 0)) < _RETOOL_CACHE_TTL_SEC:
-        return cached.get("data")
+    if not skip_cache:
+        cached = _RETOOL_CACHE.get(cache_key)
+        if cached and (now - cached.get("ts", 0)) < _RETOOL_CACHE_TTL_SEC:
+            return cached.get("data")
 
     resp = _requests_lib.post(
         RETOOL_WORKFLOW_URL,
@@ -2798,7 +2800,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v12",
+        "code_version": "2026-03-12-v13",
     })
 
 
@@ -2821,7 +2823,7 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
     # (still potentially slow depending on workflow payload)
     try:
         end_payload = {"target_date": end_date} if end_date else {}
-        raw_end = fetch_retool_webhook("organizations", payload=end_payload or None)
+        raw_end = fetch_retool_webhook("organizations", payload=end_payload or None, skip_cache=force_refresh)
         if isinstance(raw_end, dict) and raw_end.get("error"):
             raise Exception(f"Retool HTTP {raw_end.get('status')}: {raw_end.get('body','')[:500]}")
         end_rows = _extract_rows_from_retool_response(raw_end)
@@ -2839,7 +2841,7 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
                 start_date = None
 
         if start_date:
-            raw_start = fetch_retool_webhook("organizations", payload={"target_date": start_date})
+            raw_start = fetch_retool_webhook("organizations", payload={"target_date": start_date}, skip_cache=force_refresh)
             if isinstance(raw_start, dict) and raw_start.get("error"):
                 raise Exception(f"Retool start HTTP {raw_start.get('status')}: {raw_start.get('body','')[:500]}")
             start_rows = _extract_rows_from_retool_response(raw_start)
@@ -2881,7 +2883,7 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
                 _pre_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
                 _pre_date = _pre_dt.strftime("%Y-%m-%d")
                 print(f"[ghost-filter] Fetching pre-period snapshot for {_pre_date}...", flush=True)
-                _raw_pre = fetch_retool_webhook("organizations", payload={"target_date": _pre_date})
+                _raw_pre = fetch_retool_webhook("organizations", payload={"target_date": _pre_date}, skip_cache=force_refresh)
                 _pre_rows = _extract_rows_from_retool_response(_raw_pre) if not (isinstance(_raw_pre, dict) and _raw_pre.get("error")) else []
                 _pre_by_id = _dedup_by_id(_pre_rows) if _pre_rows else {}
                 print(f"[ghost-filter] Pre-period has {len(_pre_by_id)} orgs", flush=True)
