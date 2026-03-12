@@ -994,7 +994,7 @@ def nrr_analysis(mrr, migrated_source_ids=None):
                 _ps_str = str(_period_starts.iloc[0])[:10]
                 _se = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior = _before_date(_se, _ps_str) | _before_date(_cd, _ps_str)
+                _prior = _before_date(_se, _ps_str)
                 cohort.loc[_prior & cohort["_churned"], "_churned"] = False
             except Exception:
                 pass
@@ -1099,7 +1099,7 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
         _ps_str = str(period_start)[:10]
         _se = _parse_dates_naive(start_active.get("subscription_end_date", pd.Series(dtype="object")))
         _cd = _parse_dates_naive(start_active.get("cancellation_date", pd.Series(dtype="object")))
-        prior_churn_mask = _before_date(_se, _ps_str) | _before_date(_cd, _ps_str)
+        prior_churn_mask = _before_date(_se, _ps_str)
         churned_mask = churned_mask & ~prior_churn_mask
 
     churned = start_active[churned_mask]
@@ -1237,7 +1237,7 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
                 _ps2_str = str(_pss.iloc[0])[:10]
                 _se2 = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd2 = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior2 = _before_date(_se2, _ps2_str) | _before_date(_cd2, _ps2_str)
+                _prior2 = _before_date(_se2, _ps2_str)
                 cohort.loc[_prior2 & cohort["_churned"], "_churned"] = False
             except Exception:
                 pass
@@ -2803,7 +2803,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v6",
+        "code_version": "2026-03-12-v7",
     })
 
 
