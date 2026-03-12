@@ -761,6 +761,18 @@ def prepare_mrr(mrr):
         mrr["_ep"] = "UNKNOWN"
     mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
     mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
+
+    # Filter out obvious ghost rows coming from Retool view glitches:
+    # Some orgs appear with MRR but have no first_paid_date and no sync activity metadata.
+    # Treat them as non-paid for cohort math (otherwise they inflate churn).
+    if "first_paid_date" in mrr.columns:
+        mrr["_fpd"] = parse_dates(mrr["first_paid_date"])
+    else:
+        mrr["_fpd"] = pd.NaT
+    mrr["_ts"] = pd.to_numeric(mrr.get("total_syncs", 0), errors="coerce").fillna(0)
+    ghost_mask = (mrr["_sm"] > 0) & (mrr["_fpd"].isna()) & (mrr["_ts"] <= 0)
+    if ghost_mask.any():
+        mrr.loc[ghost_mask, ["_sm", "_em"]] = 0
     # DB-level sandbox flag from subscription_item table (more reliable than plan name)
     if "is_sandbox_db" in mrr.columns:
         mrr["_is_sandbox_db"] = mrr["is_sandbox_db"].apply(lambda v: bool(v) if pd.notna(v) else False)
@@ -2786,7 +2798,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v11",
+        "code_version": "2026-03-12-v12",
     })
 
 
