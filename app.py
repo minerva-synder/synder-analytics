@@ -733,6 +733,11 @@ def prepare_mrr(mrr):
         mrr["_ep"] = "UNKNOWN"
     mrr["_sm"] = pd.to_numeric(mrr.get("start_mrr", 0), errors="coerce").fillna(0)
     mrr["_em"] = pd.to_numeric(mrr.get("end_mrr", 0), errors="coerce").fillna(0)
+    # DB-level sandbox flag from subscription_item table (more reliable than plan name)
+    if "is_sandbox_db" in mrr.columns:
+        mrr["_is_sandbox_db"] = mrr["is_sandbox_db"].apply(lambda v: bool(v) if pd.notna(v) else False)
+    else:
+        mrr["_is_sandbox_db"] = False
     # NOTE: TRIAL_EXPIRED status cannot reliably identify sandbox orgs —
     # many legitimate multi-connection PRO orgs also show TRIAL_EXPIRED.
     # Sandbox identification must happen at the Retool SQL level via the
@@ -746,8 +751,8 @@ def prepare_mrr(mrr):
 
 def sandbox_analysis(mrr):
     mrr = prepare_mrr(mrr)
-    sb_start = mrr[mrr["_sp"].apply(is_sandbox)].copy()
-    sb_end = mrr[mrr["_ep"].apply(is_sandbox)].copy()
+    sb_start = mrr[mrr["_sp"].apply(is_sandbox) | mrr["_is_sandbox_db"]].copy()
+    sb_end = mrr[mrr["_ep"].apply(is_sandbox) | mrr["_is_sandbox_db"]].copy()
 
     A = {
         "start_count": len(sb_start), "start_mrr": money(_s(sb_start, "_sm")),
@@ -803,11 +808,11 @@ def sandbox_analysis(mrr):
     moved_pro = sb_start[sb_start["_ep"].isin({"PRO", "PRO_SPLIT", "PRO_SPLIT_LICENSE", "LARGE"})]
     C = {"count": len(moved_pro), "mrr_now": money(_s(moved_pro, "_em")), "accounts": accounts_table(moved_pro)}
 
-    new_sb = mrr[(mrr["_ep"].apply(is_sandbox)) & (mrr["_sm"] == 0)]
+    new_sb = mrr[(mrr["_ep"].apply(is_sandbox) | mrr["_is_sandbox_db"]) & (mrr["_sm"] == 0)]
     D = {"count": len(new_sb), "mrr_now": money(_s(new_sb, "_em")), "accounts": accounts_table(new_sb)}
 
     upgrades = sb_start[sb_start["_ep"].isin(HIGH_TOUCH)]
-    expansion = sb_start[(sb_start["_ep"].apply(is_sandbox)) & (sb_start["_em"] > sb_start["_sm"])]
+    expansion = sb_start[(sb_start["_ep"].apply(is_sandbox) | sb_start["_is_sandbox_db"]) & (sb_start["_em"] > sb_start["_sm"])]
     ud = _s(upgrades, "_em") - _s(upgrades, "_sm")
     ed = _s(expansion, "_em") - _s(expansion, "_sm")
     E = {
@@ -827,12 +832,12 @@ def sandbox_analysis(mrr):
 
 def enrich_sandbox(sb, mrr, orgs):
     mrr = prepare_mrr(mrr)
-    sb_now = mrr[mrr["_ep"].apply(is_sandbox)].copy()
+    sb_now = mrr[mrr["_ep"].apply(is_sandbox) | mrr["_is_sandbox_db"]].copy()
     if "org_id" not in orgs.columns or "org_id" not in sb_now.columns:
         return sb
 
     # Also consider orgs whose plan normalizes to sandbox (catch case-sensitive/space variants)
-    sb_now_direct = mrr[mrr["_ep"].apply(is_sandbox)].copy()
+    sb_now_direct = mrr[mrr["_ep"].apply(is_sandbox) | mrr["_is_sandbox_db"]].copy()
     # Include all sandbox orgs from orgs CSV too
     orgs_c = orgs.copy()
     orgs_c["_oid"] = orgs_c["org_id"].astype(str)
@@ -941,13 +946,17 @@ def nrr_analysis(mrr, migrated_source_ids=None):
     cohort = mrr[(mrr["_sp"].isin(NRR_PLANS)) & (mrr["_sm"] > 0) & (~mrr["_sp"].isin(SANDBOX_PLANS))].copy()
     # Cohort assignment: use last active plan before churn.
     # If last plan was sandbox → belongs in sandbox cohort, not NRR.
-    # Use last_active_plan column if available (from wide-format CSV), else fall back to _ep.
+    # Priority: last_active_plan (wide CSV) > end_plan (if non-empty) > start_plan (for churned orgs)
     if "last_active_plan" in cohort.columns:
         cohort["_last_plan"] = cohort["last_active_plan"].apply(norm_plan)
     else:
-        cohort["_last_plan"] = cohort["_ep"]
+        # For churned orgs (empty end_plan), fall back to start_plan as the last known plan
+        cohort["_last_plan"] = cohort.apply(
+            lambda r: norm_plan(r.get("end_plan", "")) if r.get("end_plan", "").strip() else r["_sp"],
+            axis=1
+        )
     # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
-    cohort = cohort[~cohort["_last_plan"].apply(is_sandbox)].copy()
+    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort.get("_is_sandbox_db", False).astype(bool))].copy()
     if cohort.empty:
         return {"nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0, "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0, "plan_breakdown": [],
                 "validation_warnings": ["NRR cohort is empty — check that NRR_PLANS includes your plan types and start_mrr > 0"]}
@@ -1157,7 +1166,7 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
     else:
         cohort["_last_plan"] = cohort["_ep"]
     # Exclude orgs whose last active plan was sandbox — they belong in sandbox cohort
-    cohort = cohort[~cohort["_last_plan"].apply(is_sandbox)].copy()
+    cohort = cohort[~(cohort["_last_plan"].apply(is_sandbox) | cohort.get("_is_sandbox_db", False).astype(bool))].copy()
     if cohort.empty:
         return {"label": label, "nrr_pct": None, "starting_mrr": 0, "ending_mrr": 0,
                 "churn_mrr": 0, "contraction_mrr": 0, "expansion_mrr": 0,
@@ -2800,6 +2809,7 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
                 "syncs_current_cycle": (e or s).get("syncs_current_cycle", 0),
                 "transfer_org_id": (e or s).get("transfer_org_id", ""),
                 "migrated_from": (e or s).get("migrated_from", ""),
+                "is_sandbox_db": bool(int(e.get("is_sandbox", 0) or 0)) or bool(int(s.get("is_sandbox", 0) or 0)),
             }
             rows.append(row)
 
