@@ -2786,7 +2786,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v10",
+        "code_version": "2026-03-12-v11",
     })
 
 
@@ -2859,6 +2859,31 @@ def _fetch_and_analyze_from_retool(force_refresh=False, override_end_date=None, 
 
         start_by_id = _dedup_by_id(start_rows)
         end_by_id = _dedup_by_id(end_rows)
+
+        # Ghost filter: fetch the day before start_date to detect orgs that "popped in"
+        # from nowhere. If an org is in start but NOT in pre-period AND NOT in end,
+        # it's a ghost that shouldn't count as churn.
+        _ghost_org_ids = set()
+        if start_date:
+            try:
+                _pre_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
+                _pre_date = _pre_dt.strftime("%Y-%m-%d")
+                print(f"[ghost-filter] Fetching pre-period snapshot for {_pre_date}...", flush=True)
+                _raw_pre = fetch_retool_webhook("organizations", payload={"target_date": _pre_date})
+                _pre_rows = _extract_rows_from_retool_response(_raw_pre) if not (isinstance(_raw_pre, dict) and _raw_pre.get("error")) else []
+                _pre_by_id = _dedup_by_id(_pre_rows) if _pre_rows else {}
+                print(f"[ghost-filter] Pre-period has {len(_pre_by_id)} orgs", flush=True)
+                # Ghost = in start, NOT in pre-period, NOT in end
+                for oid in start_by_id:
+                    if oid not in _pre_by_id and oid not in end_by_id:
+                        _ghost_org_ids.add(oid)
+                if _ghost_org_ids:
+                    print(f"[ghost-filter] Excluding {len(_ghost_org_ids)} ghost orgs from start snapshot", flush=True)
+                    for gid in _ghost_org_ids:
+                        del start_by_id[gid]
+            except Exception as _gex:
+                print(f"[ghost-filter] Failed (non-fatal): {_gex}", flush=True)
+
         all_ids = set(start_by_id.keys()) | set(end_by_id.keys())
 
         snapshot_end_date = end_rows[0].get("snapshot_date", "") if end_rows else ""
