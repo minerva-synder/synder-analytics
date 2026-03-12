@@ -381,9 +381,20 @@ def parse_dates(s):
     return pd.to_datetime(s, errors="coerce", utc=True).dt.tz_localize(None)
 
 def _parse_dates_naive(s):
-    """Parse dates to tz-naive datetime64[ns], safe for comparisons without UTC conversion."""
-    dt = pd.to_datetime(s, errors="coerce", utc=True)
-    return dt.dt.tz_localize(None).astype("datetime64[ns]")
+    """Parse dates to tz-naive datetime64[ns], safe for scalar comparisons."""
+    return pd.to_datetime(s, errors="coerce", utc=True).dt.tz_localize(None)
+
+def _before_date(series, date_str):
+    """Check if each value in a datetime Series is before a given date string.
+    Handles dtype mismatches between datetime64[ns]/[us] and Timestamp safely."""
+    cutoff = pd.to_datetime(date_str, utc=True).tz_localize(None)
+    try:
+        return series.notna() & (series < cutoff)
+    except TypeError:
+        # Fallback: compare as strings
+        cutoff_str = str(cutoff)[:10]
+        s_str = series.dt.strftime("%Y-%m-%d").fillna("")
+        return (s_str != "") & (s_str < cutoff_str)
 
 
 def money(v):
@@ -980,10 +991,10 @@ def nrr_analysis(mrr, migrated_source_ids=None):
         _period_starts = cohort["snapshot_start_date"].dropna()
         if not _period_starts.empty:
             try:
-                _ps = np.datetime64(pd.Timestamp(str(_period_starts.iloc[0])), "ns")
+                _ps_str = str(_period_starts.iloc[0])[:10]
                 _se = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior = (_se.notna() & (_se < _ps)) | (_cd.notna() & (_cd < _ps))
+                _prior = _before_date(_se, _ps_str) | _before_date(_cd, _ps_str)
                 cohort.loc[_prior & cohort["_churned"], "_churned"] = False
             except Exception:
                 pass
@@ -1073,7 +1084,7 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
         _sd = start_active["snapshot_start_date"].dropna()
         if not _sd.empty:
             try:
-                period_start = np.datetime64(pd.Timestamp(str(_sd.iloc[0])), "ns")
+                period_start = pd.to_datetime(str(_sd.iloc[0]))
             except Exception:
                 period_start = None
 
@@ -1084,13 +1095,11 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
     # Prior-period churn filter: if subscription_end_date OR cancellation_date is
     # before the period start, this org already churned last period but leaked into
     # the start snapshot via billing grace period. Exclude from current period churn.
-    if period_start is not None and "subscription_end_date" in start_active.columns:
-        _se = _parse_dates_naive(start_active["subscription_end_date"])
+    if period_start is not None and "subscription_start_date" in start_active.columns:
+        _ps_str = str(period_start)[:10]
+        _se = _parse_dates_naive(start_active.get("subscription_end_date", pd.Series(dtype="object")))
         _cd = _parse_dates_naive(start_active.get("cancellation_date", pd.Series(dtype="object")))
-        prior_churn_mask = (
-            (_se.notna() & (_se < period_start)) |
-            (_cd.notna() & (_cd < period_start))
-        )
+        prior_churn_mask = _before_date(_se, _ps_str) | _before_date(_cd, _ps_str)
         churned_mask = churned_mask & ~prior_churn_mask
 
     churned = start_active[churned_mask]
@@ -1225,10 +1234,10 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
         _pss = cohort["snapshot_start_date"].dropna()
         if not _pss.empty:
             try:
-                _ps2 = np.datetime64(pd.Timestamp(str(_pss.iloc[0])), "ns")
+                _ps2_str = str(_pss.iloc[0])[:10]
                 _se2 = _parse_dates_naive(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd2 = _parse_dates_naive(cohort.get("cancellation_date", pd.Series(dtype="object")))
-                _prior2 = (_se2.notna() & (_se2 < _ps2)) | (_cd2.notna() & (_cd2 < _ps2))
+                _prior2 = _before_date(_se2, _ps2_str) | _before_date(_cd2, _ps2_str)
                 cohort.loc[_prior2 & cohort["_churned"], "_churned"] = False
             except Exception:
                 pass
@@ -2794,7 +2803,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v5",
+        "code_version": "2026-03-12-v6",
     })
 
 
