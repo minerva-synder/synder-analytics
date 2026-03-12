@@ -974,7 +974,7 @@ def nrr_analysis(mrr, migrated_source_ids=None):
         _period_starts = cohort["snapshot_start_date"].dropna()
         if not _period_starts.empty:
             try:
-                _ps = parse_dates(pd.Series([_period_starts.iloc[0]])).iloc[0]
+                _ps = pd.Timestamp(str(_period_starts.iloc[0]))
                 _se = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
                 _prior = (_se.notna() & (_se < _ps)) | (_cd.notna() & (_cd < _ps))
@@ -1067,7 +1067,7 @@ def retention_analysis(mrr, orgs=None, migrated_source_ids=None):
         _sd = start_active["snapshot_start_date"].dropna()
         if not _sd.empty:
             try:
-                period_start = parse_dates(pd.Series([_sd.iloc[0]])).iloc[0]
+                period_start = pd.Timestamp(str(_sd.iloc[0]))
             except Exception:
                 period_start = None
 
@@ -1219,7 +1219,7 @@ def cohort_nrr_analysis(mrr, plan_set, label="", migrated_source_ids=None):
         _pss = cohort["snapshot_start_date"].dropna()
         if not _pss.empty:
             try:
-                _ps2 = parse_dates(pd.Series([_pss.iloc[0]])).iloc[0]
+                _ps2 = pd.Timestamp(str(_pss.iloc[0]))
                 _se2 = parse_dates(cohort.get("subscription_end_date", pd.Series(dtype="object")))
                 _cd2 = parse_dates(cohort.get("cancellation_date", pd.Series(dtype="object")))
                 _prior2 = (_se2.notna() & (_se2 < _ps2)) | (_cd2.notna() & (_cd2 < _ps2))
