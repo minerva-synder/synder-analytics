@@ -1351,10 +1351,23 @@ def build_cohort_data(mrr, migrated_source_ids=None):
         "high_med": cohort_nrr_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch", migrated_source_ids=_msi),
         "low": cohort_nrr_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)", migrated_source_ids=_msi),
     }
+    # Expansion by touch tier
     expansion_by_touch = {
         "high_med": cohort_expansion_analysis(mrr, TOUCH_HIGH_MED, "High/Med Touch"),
         "low": cohort_expansion_analysis(mrr, TOUCH_LOW, "Low Touch (Essential + Basic)"),
+        "sandbox": cohort_expansion_analysis(mrr, SANDBOX_PLANS, "Sandbox"),
     }
+    # Add an "Other" bucket so tier totals reconcile with overall expansion/new MRR.
+    try:
+        _pmrr = prepare_mrr(mrr.copy())
+        all_plans = set(_pmrr["_sp"].dropna().unique().tolist()) | set(_pmrr["_ep"].dropna().unique().tolist())
+        known = set(TOUCH_HIGH_MED) | set(TOUCH_LOW) | set(SANDBOX_PLANS)
+        other_plans = {p for p in all_plans if p and p not in known and p != "UNKNOWN"}
+        if other_plans:
+            expansion_by_touch["other"] = cohort_expansion_analysis(mrr, other_plans, "Other")
+    except Exception:
+        pass
+
     # Blended NRR across all tiers (company-wide)
     hm = nrr_by_touch["high_med"]
     lw = nrr_by_touch["low"]

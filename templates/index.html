@@ -275,13 +275,21 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-s
         <!-- Expansion by Touch Tier -->
         <div class="section-title">3b. Expansion by Touch Tier</div>
         <div class="row g-3 mb-3">
-          <div class="col-md-6">
+          <div class="col-md-3">
             <h6 class="text-muted mb-2">High/Med Touch</h6>
             <div class="row g-3 mb-2" id="expTouchHighMed"></div>
           </div>
-          <div class="col-md-6">
+          <div class="col-md-3">
             <h6 class="text-muted mb-2">Low Touch (Essential + Basic)</h6>
             <div class="row g-3 mb-2" id="expTouchLow"></div>
+          </div>
+          <div class="col-md-3">
+            <h6 class="text-muted mb-2">Sandbox</h6>
+            <div class="row g-3 mb-2" id="expTouchSandbox"></div>
+          </div>
+          <div class="col-md-3">
+            <h6 class="text-muted mb-2">Other</h6>
+            <div class="row g-3 mb-2" id="expTouchOther"></div>
           </div>
         </div>
 
@@ -1071,6 +1079,8 @@ function renderCohortData(cd) {
   if (cd.expansion_by_touch) {
     renderExpTouchTier('expTouchHighMed', cd.expansion_by_touch.high_med, 'ett_hm');
     renderExpTouchTier('expTouchLow', cd.expansion_by_touch.low, 'ett_low');
+    if (cd.expansion_by_touch.sandbox) renderExpTouchTier('expTouchSandbox', cd.expansion_by_touch.sandbox, 'ett_sb');
+    if (cd.expansion_by_touch.other) renderExpTouchTier('expTouchOther', cd.expansion_by_touch.other, 'ett_oth');
   }
 
   // Retention cohort tabs
