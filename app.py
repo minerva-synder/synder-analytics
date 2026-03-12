@@ -2793,7 +2793,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v3",
+        "code_version": "2026-03-12-v4-numpy",
     })
 
 
