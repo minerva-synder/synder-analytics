@@ -326,8 +326,8 @@ def accounts_table(df, start_col="_sm", end_col="_em"):
             "org_id": str(oid) if oid is not None else "",
             "synder_url": synder_org_url(oid),
             "org_name": r.get("org_name", ""),
-            "start_plan": r.get("start_plan", None),
-            "end_plan": r.get("end_plan", None),
+            "start_plan": r.get("start_plan", None) if r.get("start_plan", None) not in (None, "") else r.get("_sp", None),
+            "end_plan": r.get("end_plan", None) if r.get("end_plan", None) not in (None, "") else r.get("_ep", None),
             "start_mrr": money(r.get(start_col, 0)),
             "end_mrr": money(r.get(end_col, 0)),
             "delta": money(money(r.get(end_col, 0)) - money(r.get(start_col, 0))),
@@ -2786,7 +2786,7 @@ def api_snapshot_status():
     return jsonify({
         "available_months": _list_available_snapshots(),
         "refresh_jobs": _refresh_status,
-        "code_version": "2026-03-12-v9",
+        "code_version": "2026-03-12-v10",
     })
 
 
