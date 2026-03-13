@@ -401,7 +401,9 @@ def run_refresh():
         if i > 0 and i % 20 == 0:
             time.sleep(0.5)  # rate limit
 
-    # Filter: only keep tickets with some risk signal (or all for completeness)
+    # Only keep tickets with actual churn signals (red or yellow) — no green/low-risk
+    analyzed = [t for t in analyzed if t["risk_level"] in ("red", "yellow")]
+
     snapshot = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "ticket_count": len(analyzed),
