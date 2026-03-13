@@ -35,6 +35,25 @@ HUBSPOT_BASE = "https://api.hubapi.com"
 MARCH_1_2026  = "2026-03-01T00:00:00Z"
 MARCH_1_MS    = 1740787200000  # 2026-03-01 00:00:00 UTC in ms
 
+# Pipeline IDs (Synder only — no BI)
+PIPELINE_STANDARD = "0"
+PIPELINE_PREMIUM  = "106427545"
+ALLOWED_PIPELINES = {PIPELINE_STANDARD, PIPELINE_PREMIUM}
+
+# Excluded ticket stages — "no csat", "In devs", "In devs: waiting on us", "Duplicated request"
+EXCLUDED_STAGES = {
+    # Standard
+    "1197843890",   # no csat
+    "1035321433",   # In devs
+    "1253083441",   # In devs: waiting on us
+    "1222091015",   # Duplicated request
+    # Premium
+    "1197722748",   # no csat
+    "1035433328",   # In devs
+    "1253073796",   # In devs: waiting on us
+    "1222148158",   # Duplicated request
+}
+
 # ---------------------------------------------------------------------------
 # HubSpot key
 # ---------------------------------------------------------------------------
@@ -111,16 +130,22 @@ def save_feedback(fb):
 # ---------------------------------------------------------------------------
 DISSATISFACTION_PATTERNS = [
     r"not happy", r"unhappy", r"disappointed", r"frustrat", r"terrible",
-    r"worst", r"awful", r"horrible", r"disgusted", r"unacceptable",
-    r"this is ridiculous", r"this is a joke", r"waste of", r"useless",
-    r"doesn['\u2019]t work", r"broken", r"still not", r"again",
-    r"been waiting", r"no response", r"no reply", r"never got",
-    r"cancell?", r"refund", r"switch", r"competitor", r"alternative",
-    r"leave synder", r"stop using", r"close my account", r"unsubscrib",
-    r"lost trust", r"no longer trust", r"can['\u2019]t rely",
-    r"completely wrong", r"totally wrong", r"incorrect", r"inaccurate",
-    r"serious issue", r"critical", r"urgent", r"escalat",
-    r"this is not okay", r"not acceptable", r"very upset",
+    r"worst experience", r"awful", r"horrible", r"disgusted", r"unacceptable",
+    r"this is ridiculous", r"this is a joke", r"waste of (time|money)",
+    r"useless (app|tool|software|product|service)",
+    r"been waiting for (days|weeks|a long time|over)",
+    r"no response from", r"no one (has |is )?(respond|repl|help|answer)",
+    r"never got (back|a reply|a response)",
+    r"cancel(l)? (my |the )?(account|subscription|plan|service)",
+    r"(want|need|demand) (a )?refund",
+    r"switch(ing)? to", r"competitor", r"alternative (to synder|app|tool)",
+    r"leave synder", r"stop using synder", r"close my account", r"unsubscrib",
+    r"lost trust", r"no longer trust", r"can['\u2019]t rely on",
+    r"completely wrong", r"totally wrong", r"data is (incorrect|wrong|inaccurate)",
+    r"this is not (okay|acceptable|right)", r"very upset", r"extremely frustrat",
+    r"asap", r"escalat(e|ion)",
+    r"i('ve| have) been (trying|asking|waiting)",
+    r"(third|3rd|fourth|4th|fifth) time (i('m| am)|asking|contacting)",
 ]
 
 CATEGORY_RULES = [
@@ -129,8 +154,8 @@ CATEGORY_RULES = [
     ("No Reply / SLA Breach",   [r"no response", r"no reply", r"never got", r"been waiting", r"still waiting"]),
     ("Repeated Updates Request",[r"again", r"still not", r"third time", r"multiple times", r"keep asking"]),
     ("Frustration / Anger",     [r"frustrat", r"terrible", r"awful", r"horrible", r"ridiculous", r"unacceptable", r"very upset", r"disgusted"]),
-    ("Feature / Product Failure",[r"broken", r"doesn['\u2019]t work", r"not working", r"error", r"bug", r"glitch"]),
-    ("Competitor Mention",      [r"competitor", r"alternative", r"other tool", r"xero", r"quickbooks", r"another app"]),
+    ("Feature / Product Failure",[r"(app|synder|tool|software) (is )?(broken|not working|keeps (crash|fail|break))", r"(constant|recurring|persistent) (error|bug|issue|problem)", r"(same )?bug (again|still|keeps)"]),
+    ("Competitor Mention",      [r"switch(ing)? to (another|a different|other)", r"competitor", r"alternative (to synder|app|tool)", r"(better|cheaper) (app|tool|alternative)"]),
 ]
 
 def detect_churn_signals(text):
@@ -161,41 +186,50 @@ def analyze_ticket(ticket, messages, owner_map):
     props = ticket.get("properties", {})
     ticket_id = ticket.get("id", "")
 
-    # Combine all message bodies for analysis
-    all_text = " ".join(
-        m.get("properties", {}).get("hs_email_text", "") or
-        m.get("properties", {}).get("body", "") or ""
-        for m in messages
-    )
-    subject = props.get("subject", "") or ""
-    all_text = subject + " " + all_text
-
-    signal_count, categories, risk = detect_churn_signals(all_text)
-
-    # Check for 24h no-reply
+    # Separate customer messages from agent messages
+    customer_texts = []
     last_customer_msg = None
-    for m in messages:
-        direction = (m.get("properties", {}).get("hs_email_direction") or
-                     m.get("properties", {}).get("direction") or "")
-        ts_raw = (m.get("properties", {}).get("hs_timestamp") or
-                  m.get("properties", {}).get("createdAt") or "")
-        if direction in ("INCOMING_EMAIL", "INCOMING", "incoming"):
-            try:
-                ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                if last_customer_msg is None or ts > last_customer_msg:
-                    last_customer_msg = ts
-            except Exception:
-                pass
+    last_agent_msg = None
 
+    for m in messages:
+        mp = m.get("properties", {})
+        direction = (mp.get("hs_email_direction") or mp.get("direction") or "")
+        body = (mp.get("hs_email_text") or mp.get("body") or "")
+        ts_raw = (mp.get("hs_timestamp") or mp.get("createdAt") or "")
+
+        try:
+            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        except Exception:
+            ts = None
+
+        if direction in ("INCOMING_EMAIL", "INCOMING", "incoming"):
+            customer_texts.append(body)
+            if ts and (last_customer_msg is None or ts > last_customer_msg):
+                last_customer_msg = ts
+        elif direction in ("FORWARDED_EMAIL", "OUTGOING", "outgoing"):
+            if ts and (last_agent_msg is None or ts > last_agent_msg):
+                last_agent_msg = ts
+
+    # Scan CUSTOMER messages for frustration/churn signals
+    subject = props.get("subject", "") or ""
+    customer_text = subject + " " + " ".join(customer_texts)
+    signal_count, categories, risk = detect_churn_signals(customer_text)
+
+    # Check for 24h+ no agent reply after last customer message
     no_reply_24h = False
     if last_customer_msg:
-        age = datetime.now(last_customer_msg.tzinfo) - last_customer_msg
-        if age.total_seconds() > 86400:
-            no_reply_24h = True
-            if "No Reply / SLA Breach" not in categories:
-                categories.append("No Reply / SLA Breach")
-            if risk == "green":
-                risk = "yellow"
+        # If no agent reply at all, or last agent reply was BEFORE last customer msg
+        reply_needed = (last_agent_msg is None or last_agent_msg < last_customer_msg)
+        if reply_needed:
+            age = datetime.now(last_customer_msg.tzinfo) - last_customer_msg
+            if age.total_seconds() > 86400:
+                no_reply_24h = True
+                if "No Reply / SLA Breach" not in categories:
+                    categories.append("No Reply / SLA Breach")
+                if risk == "green":
+                    risk = "yellow"
+                elif risk == "yellow" and age.total_seconds() > 172800:  # 48h+ → escalate to red
+                    risk = "red"
 
     owner_id = props.get("hubspot_owner_id", "") or ""
     agent = owner_map.get(str(owner_id), "Unassigned") if owner_id else "Unassigned"
@@ -268,27 +302,18 @@ def fetch_owner_map():
         pass
     return {}
 
-def fetch_tickets_page(after=None):
-    params = {
-        "limit": 100,
-        "properties": "subject,hs_pipeline_stage,hs_ticket_priority,hubspot_owner_id,createdate,hs_timestamp,hs_lastmodifieddate",
-        "filterGroups": json.dumps([{
-            "filters": [{
-                "propertyName": "createdate",
-                "operator": "GTE",
-                "value": str(MARCH_1_MS)
-            }]
-        }]),
-        "sorts": json.dumps([{"propertyName": "createdate", "direction": "DESCENDING"}]),
-    }
-    if after:
-        params["after"] = after
+def fetch_tickets_page(after=None, pipeline_id="0"):
+    """Fetch tickets from a specific pipeline, created after March 1."""
     r = req.post(
         f"{HUBSPOT_BASE}/crm/v3/objects/tickets/search",
         headers=hs_headers(),
         json={
-            "filterGroups": [{"filters": [{"propertyName": "createdate", "operator": "GTE", "value": str(MARCH_1_MS)}]}],
-            "properties": ["subject", "hs_pipeline_stage", "hs_ticket_priority", "hubspot_owner_id", "createdate", "hs_timestamp"],
+            "filterGroups": [{"filters": [
+                {"propertyName": "createdate", "operator": "GTE", "value": str(MARCH_1_MS)},
+                {"propertyName": "hs_pipeline", "operator": "EQ", "value": pipeline_id},
+            ]}],
+            "properties": ["subject", "hs_pipeline", "hs_pipeline_stage", "hs_ticket_priority",
+                           "hubspot_owner_id", "createdate", "hs_timestamp"],
             "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}],
             "limit": 100,
             **({"after": after} if after else {}),
@@ -335,25 +360,33 @@ def run_refresh():
     log.append(f"Owners fetched: {len(owner_map)}")
 
     tickets_raw = []
-    after = None
-    page_count = 0
-    while page_count < 20:  # max 2000 tickets
-        try:
-            data = fetch_tickets_page(after)
-        except Exception as e:
-            log.append(f"Error fetching tickets page: {e}")
-            break
-        results = data.get("results", [])
-        tickets_raw.extend(results)
-        paging = data.get("paging", {})
-        after = paging.get("next", {}).get("after")
-        page_count += 1
-        log.append(f"Page {page_count}: {len(results)} tickets (total so far: {len(tickets_raw)})")
-        if not after:
-            break
-        time.sleep(0.2)  # rate limit
+    for pipeline_id in ALLOWED_PIPELINES:
+        after = None
+        page_count = 0
+        pipeline_count = 0
+        while page_count < 20:  # max 2000 per pipeline
+            try:
+                data = fetch_tickets_page(after, pipeline_id=pipeline_id)
+            except Exception as e:
+                log.append(f"Error fetching pipeline {pipeline_id} page: {e}")
+                break
+            results = data.get("results", [])
+            pipeline_count += len(results)
+            tickets_raw.extend(results)
+            paging = data.get("paging", {})
+            after = paging.get("next", {}).get("after")
+            page_count += 1
+            if not after:
+                break
+            time.sleep(0.2)
+        log.append(f"Pipeline {pipeline_id}: {pipeline_count} tickets fetched")
 
-    log.append(f"Total tickets fetched: {len(tickets_raw)}")
+    # Filter out excluded stages (no csat, in devs, duplicated)
+    before_filter = len(tickets_raw)
+    tickets_raw = [t for t in tickets_raw
+                   if t.get("properties", {}).get("hs_pipeline_stage", "") not in EXCLUDED_STAGES]
+    log.append(f"After stage filter: {len(tickets_raw)} (removed {before_filter - len(tickets_raw)} no-csat/in-devs/duplicates)")
+    log.append(f"Total tickets to analyze: {len(tickets_raw)}")
 
     # Analyze each ticket
     analyzed = []
