@@ -364,7 +364,7 @@ def run_refresh():
         after = None
         page_count = 0
         pipeline_count = 0
-        while page_count < 20:  # max 2000 per pipeline
+        while page_count < 5:  # max 500 per pipeline (5 pages × 100)
             try:
                 data = fetch_tickets_page(after, pipeline_id=pipeline_id)
             except Exception as e:
@@ -398,8 +398,8 @@ def run_refresh():
             analyzed.append(enriched)
         except Exception as e:
             log.append(f"Error analyzing ticket {tid}: {e}")
-        if i > 0 and i % 20 == 0:
-            time.sleep(0.5)  # rate limit
+        if i > 0 and i % 10 == 0:
+            time.sleep(1.0)  # rate limit — be gentle with HubSpot API
 
     # Only keep tickets with actual churn signals (red or yellow) — no green/low-risk
     analyzed = [t for t in analyzed if t["risk_level"] in ("red", "yellow")]
